@@ -1,0 +1,590 @@
+name: Fixbot
+
+# Fixbot: la red que se entera de que el código o el despliegue real se
+# rompieron sin que nadie tenga que mirarlo a mano.
+#
+# `test.yml` atrapa lo que se rompe ANTES de mergear (corre en cada PR).
+# Este workflow atrapa lo que se rompe DESPUÉS: una regresión que se coló en
+# la rama de trabajo, un despliegue real que quedó mal (VM de Oracle caída, túnel de
+# Cloudflare muerto, la contraseña de la app desactivada por accidente) o una
+# dependencia que se volvió vulnerable de un día para el otro. Cuando
+# encuentra algo, abre (o actualiza) UN issue con el diagnóstico; cuando se
+# arregla, lo cierra solo.
+#
+# ---------------------------------------------------------------------------
+# DISEÑO DE SEGURIDAD: por qué son TRES jobs y no uno
+# ---------------------------------------------------------------------------
+# El repo es PÚBLICO. Eso significa que cualquiera puede abrir un PR que
+# modifique `package.json`/`pyproject.toml` con un postinstall/script
+# malicioso, y que `workflow_dispatch` y `schedule` corren con el
+# `GITHUB_TOKEN` del repo (no con el de un fork). Si un solo job instalara
+# dependencias de terceros Y sostuviera un token con permiso de escritura
+# (`issues: write`), esa dependencia comprometida tendría, en el mismo
+# proceso, acceso a ese token. Por eso se separa en tres:
+#
+#   1. `codigo`   — permissions: contents: read (nada más). Instala TODO
+#                   (uv sync, npm ci) y corre tests/lint/typecheck/build/
+#                   audit. Puede correr una dependencia maliciosa, pero no
+#                   tiene ningún token con el que hacer daño.
+#   2. `salud`    — permissions: {} (ni siquiera contents: read de escritura,
+#                   token sin permisos). NO instala una sola dependencia de
+#                   terceros: sólo hace checkout y corre
+#                   `scripts/health_check.py`, que es stdlib puro. Nada que
+#                   comprometer.
+#   3. `reportar` — permissions: issues: write (nada más, ni contents). Es el
+#                   ÚNICO job con un token que puede escribir algo, y a
+#                   propósito no instala nada ni corre código del proyecto:
+#                   sólo baja los artifacts de los otros dos jobs (texto
+#                   plano) y llama a la API de Issues vía
+#                   `actions/github-script`. No hay ninguna dependencia de
+#                   npm o de PyPI corriendo en el mismo proceso que el token.
+#
+# Además, todo el workflow es de sólo-diagnóstico: no hace push, no mergea,
+# no toca un deploy. El arreglo lo escribe una persona (o un agente con
+# revisión humana) a partir del issue.
+#
+# ---------------------------------------------------------------------------
+# ENDURECIMIENTO ADICIONAL (más allá de lo anterior)
+# ---------------------------------------------------------------------------
+# - Actions fijadas por SHA completo, no por tag. Un tag (`@v4`) es mutable:
+#   quien controle ese repo de Actions puede repuntar el tag a otro commit
+#   sin que nada en este archivo cambie. Fue exactamente el mecanismo del
+#   incidente de tj-actions/changed-files (marzo 2025): un tag reapuntado
+#   filtró secretos de miles de repos que confiaban en el tag, no en un SHA.
+#   El costo es que hay que bumpear las versiones a mano: para actualizar una
+#   action, mirá su changelog/releases en GitHub, elegí el tag nuevo, copiá
+#   el SHA completo del commit al que apunta ESE tag (no "el último commit de
+#   main") y actualizá la línea `uses:` y el comentario `# vX` juntos.
+# - `persist-credentials: false` en todo `actions/checkout`. Sin esto, el
+#   token queda escrito en `.git/config` del checkout mientras corren
+#   `npm ci` / `uv sync` — cualquier script `postinstall` de una dependencia
+#   comprometida podría leerlo de ahí.
+# - `permissions: {}` a nivel del workflow (deniega todo por defecto) y cada
+#   job pide sólo lo mínimo que necesita.
+# - Ningún `${{ ... }}` interpolado DENTRO de un bloque `run:`. Un valor que
+#   viniera de un input, un secreto o (en otro workflow) de un título de PR
+#   pegado ahí se interpreta como texto de shell, no como dato — eso es
+#   inyección de script. Todo lo que un `run:` necesita entra por `env:`.
+# - `concurrency` con `cancel-in-progress: false`: dos corridas del fixbot en
+#   paralelo (un cron que se superpone con un "Run workflow" manual)
+#   editarían el mismo issue a la vez.
+# - `timeout-minutes` en cada job, para que un paso colgado no deje el
+#   workflow corriendo indefinidamente.
+#
+# ATENCIÓN — ANTES DE QUE ESTO SIRVA DE ALGO EN ESTE REPO CONCRETO:
+# la rama por defecto de Anthony-CD/open-notebook es `main`, pero TODO el
+# trabajo vive en `master` (`origin/main` quedó en un snapshot del 2026-08-20).
+# Importa porque GitHub corre los workflows con `schedule` SÓLO desde la rama
+# por defecto, y sólo lista en la pestaña Actions los que existen en esa rama.
+# Con este archivo únicamente en `master`, el fixbot no se dispara nunca ni
+# aparece el botón "Run workflow". Verificado: este fork no tiene ni una
+# corrida de workflow en todo su historial, porque `test.yml` también se
+# dispara sólo en `main` y nadie empuja ahí.
+# Arreglo recomendado (un clic, reversible): Settings → General → Default
+# branch → `master`. De paso, los tests del repo empiezan a correr de verdad
+# sobre el trabajo propio. La alternativa es mergear este archivo también en
+# `main`.
+#
+# GOTCHA REAL (no es un bug de este archivo): GitHub deshabilita los
+# workflows con `schedule` automáticamente (a) en cualquier repo que sea un
+# fork, y (b) en repos públicos tras 60 días sin actividad en el repo. Si el
+# fixbot deja de correr solo un día, ésa es la causa más probable — no un
+# error de sintaxis. El botón "Run workflow" (arriba a la derecha en la
+# pestaña Actions → Fixbot) sigue funcionando siempre y es la forma manual de
+# reactivarlo / correrlo después de un deploy.
+
+on:
+  schedule:
+    # Cada 6 horas. El cron de GitHub Actions es UTC y puede correrse unos
+    # minutos si los runners están saturados: esto es un chequeo periódico,
+    # no un monitor de segundos.
+    - cron: "0 */6 * * *"
+  # Botón manual en la pestaña Actions, para correrlo después de un deploy
+  # sin esperar al próximo turno, o para apuntar a otra URL puntualmente.
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL del despliegue a chequear (vacío = usa el secreto ON_HEALTH_URL)"
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  # Dos corridas simultáneas se pisarían editando el mismo issue.
+  group: fixbot
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # 1) Salud del código en la rama de trabajo: instala TODO, sin poder escribir.
+  # ===========================================================================
+  codigo:
+    name: Código
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      # La instalación va primero a propósito: es la causa raíz de la que
+      # cuelgan todas las demás. Si `uv sync` falla, los tests, ruff y mypy
+      # fallan TAMBIÉN, y sin esta fila el issue muestra tres rojos sin decir
+      # que el problema real es uno solo. Misma idea de cascada que
+      # `scripts/health_check.py`.
+      uv_sync: ${{ steps.uv_sync.outcome }}
+      npm_ci: ${{ steps.npm_ci.outcome }}
+      tests: ${{ steps.tests.outcome }}
+      ruff: ${{ steps.ruff.outcome }}
+      mypy: ${{ steps.mypy.outcome }}
+      frontend_lint: ${{ steps.frontend_lint.outcome }}
+      frontend_test: ${{ steps.frontend_test.outcome }}
+      frontend_build: ${{ steps.frontend_build.outcome }}
+      frontend_audit: ${{ steps.frontend_audit.outcome }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # --- Backend (uv) ------------------------------------------------------
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      # continue-on-error acá también: si la instalación falla, igual
+      # queremos llegar a la sección de frontend y tener SU informe completo,
+      # en vez de abortar el job entero por un problema del lado backend.
+      - name: Instalar dependencias (backend)
+        id: uv_sync
+        continue-on-error: true
+        run: uv sync
+
+      # Cada paso de chequeo es continue-on-error a propósito: queremos el
+      # informe COMPLETO de todo lo que está roto en una sola pasada, no
+      # abortar en el primer fallo y tener que adivinar el resto. `tee` deja
+      # el log completo en un archivo que después sube como artifact.
+      - name: Tests (backend)
+        id: tests
+        continue-on-error: true
+        run: set -o pipefail; uv run pytest tests/ 2>&1 | tee informe-tests.txt
+
+      - name: Ruff (lint backend)
+        id: ruff
+        continue-on-error: true
+        run: set -o pipefail; uv run ruff check . 2>&1 | tee informe-ruff.txt
+
+      - name: Mypy (typecheck backend)
+        id: mypy
+        continue-on-error: true
+        run: set -o pipefail; uv run python -m mypy . 2>&1 | tee informe-mypy.txt
+
+      # --- Frontend (npm) -----------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Instalar dependencias (frontend)
+        id: npm_ci
+        continue-on-error: true
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        id: frontend_lint
+        continue-on-error: true
+        working-directory: frontend
+        run: set -o pipefail; npm run lint 2>&1 | tee informe-frontend-lint.txt
+
+      - name: Tests frontend
+        id: frontend_test
+        continue-on-error: true
+        working-directory: frontend
+        run: set -o pipefail; npm run test 2>&1 | tee informe-frontend-test.txt
+
+      - name: Build frontend
+        id: frontend_build
+        continue-on-error: true
+        working-directory: frontend
+        run: set -o pipefail; npm run build 2>&1 | tee informe-frontend-build.txt
+
+      # Severidad AVISO, no crítica: no tumba la corrida y no abre issue por
+      # sí sola (ver el job `reportar`). El propio pyproject.toml documenta
+      # un advisory de Pillow que no se puede cerrar hoy por un cap de
+      # versión de moviepy aguas arriba — el equivalente del lado npm existe
+      # también (paquetes transitivos con advisories sin fix disponible
+      # todavía). Un bot que queda permanentemente en rojo por algo que nadie
+      # puede arreglar hoy se convierte en ruido y la gente deja de leerlo;
+      # por eso esta fila se reporta pero no cuenta como "hay algo roto".
+      - name: Auditoría de dependencias (frontend)
+        id: frontend_audit
+        continue-on-error: true
+        working-directory: frontend
+        run: set -o pipefail; npm audit --audit-level=high 2>&1 | tee informe-frontend-audit.txt
+
+      - name: Subir informes
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: informes-codigo
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            informe-tests.txt
+            informe-ruff.txt
+            informe-mypy.txt
+            frontend/informe-frontend-lint.txt
+            frontend/informe-frontend-test.txt
+            frontend/informe-frontend-build.txt
+            frontend/informe-frontend-audit.txt
+
+  # ===========================================================================
+  # 2) Salud del despliegue real: CERO dependencias de terceros, CERO token.
+  # ===========================================================================
+  salud:
+    name: Salud del despliegue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      codigo_salida: ${{ steps.salud.outputs.codigo_salida }}
+      estado: ${{ steps.salud.outputs.estado }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Nada de `uv sync` / `npm ci` acá: la sonda es stdlib puro (ver el
+      # encabezado de scripts/health_check.py), así que este job entero corre
+      # sin instalar una sola dependencia de terceros y sin ningún permiso.
+      #
+      # La URL nunca se interpola dentro del `run:` (eso quedaría en el log
+      # de la corrida, que es público) — entra únicamente por `env:`. El
+      # input de workflow_dispatch pisa al secreto sólo si viene no-vacío.
+      - name: Chequeo de salud del despliegue
+        id: salud
+        shell: bash
+        env:
+          ON_HEALTH_URL: ${{ github.event.inputs.url || secrets.ON_HEALTH_URL }}
+        run: |
+          set +e
+          python3 scripts/health_check.py --report=informe-salud.md
+          codigo=$?
+          set -e
+          echo "codigo_salida=$codigo" >> "$GITHUB_OUTPUT"
+          # Los tres estados de scripts/health_check.py tienen que llegar
+          # enteros hasta el issue: 0 = ok, 1 = encontró algo roto (crítico),
+          # 2 = no hay URL configurada. El estado 2 NO es un fallo — es
+          # "todavía no configuraste el secreto" — y no debe reportarse como
+          # verde ni abrir un issue por sí solo.
+          if [ "$codigo" = "0" ]; then
+            echo "estado=ok" >> "$GITHUB_OUTPUT"
+          elif [ "$codigo" = "2" ]; then
+            echo "estado=sin-configurar" >> "$GITHUB_OUTPUT"
+          else
+            echo "estado=fallo" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Subir informe de salud
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: informe-salud
+          # Con codigo=2 (sin configurar) el script no llega a escribir el
+          # informe: no hay URL que enmascarar ni nada que reportar.
+          if-no-files-found: ignore
+          retention-days: 14
+          path: informe-salud.md
+
+  # ===========================================================================
+  # 3) Reportar: el ÚNICO job con token de escritura. No instala nada, no
+  #    corre código del proyecto — sólo arma texto y llama a la API de Issues.
+  # ===========================================================================
+  reportar:
+    name: Reportar
+    needs: [codigo, salud]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      # continue-on-error: si `codigo` falló ANTES de llegar al paso de
+      # subida (por ejemplo, el checkout falló), no hay artifact que bajar;
+      # queremos seguir igual y reportar esa caída como fallo genérico en vez
+      # de que este job entero aborte acá.
+      - name: Descargar informes de código
+        id: descargar_codigo
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: informes-codigo
+          path: informes-codigo
+
+      - name: Descargar informe de salud
+        id: descargar_salud
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: informe-salud
+          path: .
+
+      # --- Armar el cuerpo del issue ------------------------------------------
+      - name: Armar informe
+        id: informe
+        shell: bash
+        env:
+          OUT_UV_SYNC: ${{ needs.codigo.outputs.uv_sync }}
+          OUT_NPM_CI: ${{ needs.codigo.outputs.npm_ci }}
+          OUT_TESTS: ${{ needs.codigo.outputs.tests }}
+          OUT_RUFF: ${{ needs.codigo.outputs.ruff }}
+          OUT_MYPY: ${{ needs.codigo.outputs.mypy }}
+          OUT_FRONTEND_LINT: ${{ needs.codigo.outputs.frontend_lint }}
+          OUT_FRONTEND_TEST: ${{ needs.codigo.outputs.frontend_test }}
+          OUT_FRONTEND_BUILD: ${{ needs.codigo.outputs.frontend_build }}
+          OUT_FRONTEND_AUDIT: ${{ needs.codigo.outputs.frontend_audit }}
+          SALUD_ESTADO: ${{ needs.salud.outputs.estado }}
+          SALUD_RESULT: ${{ needs.salud.result }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          hubo_fallo=no
+
+          {
+            echo "El Fixbot corrió sus chequeos y encontró problemas. Este issue se actualiza solo en cada corrida y **se cierra solo** cuando todo vuelva a pasar."
+            echo
+            echo "| Chequeo | Resultado |"
+            echo "| --- | --- |"
+          } > cuerpo.md
+
+          # Chequeo crítico. Tres entradas posibles, no dos:
+          #   "success"  -> pasó
+          #   ""         -> el job no llegó a correr ese paso (se canceló, se
+          #                 murió el runner). NO es verde: "no lo pude medir"
+          #                 nunca se reporta como "está bien" — misma regla
+          #                 que aplica `scripts/health_check.py` con los
+          #                 chequeos que saltea.
+          #   cualquier otra cosa -> falló
+          fila() { # $1 = nombre, $2 = outcome
+            if [ "$2" = "success" ]; then
+              echo "| $1 | ✅ |" >> cuerpo.md
+            elif [ -z "$2" ]; then
+              echo "| $1 | ⚙️ no se pudo medir |" >> cuerpo.md
+              hubo_fallo=si
+            else
+              echo "| $1 | ❌ |" >> cuerpo.md
+              hubo_fallo=si
+            fi
+          }
+
+          # Igual que `fila`, pero para lo que depende de que la instalación
+          # de dependencias haya salido bien: si el `uv sync` / `npm ci` de
+          # arriba falló, esto no se mide, se explica. Sin esta cascada el
+          # issue muestra tres o cuatro rojos donde el problema es uno solo.
+          fila_dependiente() { # $1 = nombre, $2 = outcome, $3 = outcome instalación, $4 = nombre de la causa
+            if [ "$3" != "success" ]; then
+              echo "| $1 | ⚙️ no evaluado — causa: $4 |" >> cuerpo.md
+            else
+              fila "$1" "$2"
+            fi
+          }
+
+          # Chequeo de severidad AVISO: se muestra distinto (⚠️) pero NUNCA
+          # marca hubo_fallo. Ver el comentario sobre npm audit más arriba.
+          fila_aviso() { # $1 = nombre, $2 = outcome
+            if [ "$2" = "success" ]; then
+              echo "| $1 | ✅ |" >> cuerpo.md
+            else
+              echo "| $1 | ⚠️ |" >> cuerpo.md
+            fi
+          }
+
+          fila "Instalación de dependencias (backend)" "$OUT_UV_SYNC"
+          fila_dependiente "Tests (backend)" "$OUT_TESTS" "$OUT_UV_SYNC" "instalación backend"
+          fila_dependiente "Ruff · lint backend" "$OUT_RUFF" "$OUT_UV_SYNC" "instalación backend"
+          fila_dependiente "Mypy · typecheck backend" "$OUT_MYPY" "$OUT_UV_SYNC" "instalación backend"
+          fila "Instalación de dependencias (frontend)" "$OUT_NPM_CI"
+          fila_dependiente "Lint frontend" "$OUT_FRONTEND_LINT" "$OUT_NPM_CI" "instalación frontend"
+          fila_dependiente "Tests frontend" "$OUT_FRONTEND_TEST" "$OUT_NPM_CI" "instalación frontend"
+          fila_dependiente "Build frontend" "$OUT_FRONTEND_BUILD" "$OUT_NPM_CI" "instalación frontend"
+          if [ "$OUT_NPM_CI" != "success" ]; then
+            echo "| Auditoría de dependencias (frontend) | ⚙️ no evaluado — causa: instalación frontend |" >> cuerpo.md
+          else
+            fila_aviso "Auditoría de dependencias (frontend)" "$OUT_FRONTEND_AUDIT"
+          fi
+
+          # Salud del despliegue: cuatro estados, no dos. "sin-configurar" se
+          # marca distinto (⚙️) y a propósito NO cuenta como fallo por sí
+          # solo — recién si además hay algo roto en el código, el issue se
+          # abre igual y este renglón queda documentado ahí adentro. El estado
+          # vacío es distinto: significa que el job de salud ni terminó, y eso
+          # sí cuenta como fallo (no se pudo medir != está bien).
+          case "$SALUD_ESTADO" in
+            ok) echo "| Salud del despliegue | ✅ |" >> cuerpo.md ;;
+            fallo) echo "| Salud del despliegue | ❌ |" >> cuerpo.md; hubo_fallo=si ;;
+            sin-configurar) echo "| Salud del despliegue | ⚙️ sin configurar |" >> cuerpo.md ;;
+            *)
+              echo "| Salud del despliegue | ⚙️ no se pudo medir (el job terminó en \`$SALUD_RESULT\`) |" >> cuerpo.md
+              hubo_fallo=si
+              ;;
+          esac
+
+          # El informe de salud es el más accionable (dice QUÉ ruta se rompió
+          # y por qué importa, ya con la URL enmascarada), así que va entero
+          # y sin plegar. Cuando no está configurado, en cambio, no hay
+          # informe: se explica el paso que falta.
+          if [ "$SALUD_ESTADO" = "fallo" ] && [ -f informe-salud.md ]; then
+            { echo; echo "## Despliegue"; echo; cat informe-salud.md; } >> cuerpo.md
+          elif [ "$SALUD_ESTADO" = "sin-configurar" ]; then
+            {
+              echo
+              echo "## Despliegue"
+              echo
+              echo "No hay URL configurada para chequear el despliegue real: falta el secreto de repo \`ON_HEALTH_URL\`. Configuralo en *Settings → Secrets and variables → Actions* con la URL del túnel de Cloudflare (ver \`scripts/README.md\`)."
+            } >> cuerpo.md
+          fi
+
+          # El resto va plegado: son logs largos y sólo interesan si esa
+          # línea de la tabla está en rojo (o en amarillo, para la
+          # auditoría).
+          detalle() { # $1 = título, $2 = outcome, $3 = archivo
+            if [ "$2" != "success" ] && [ -f "$3" ]; then
+              {
+                echo
+                echo "<details><summary>$1</summary>"
+                echo
+                echo '```'
+                tail -c 8000 "$3"
+                echo '```'
+                echo
+                echo "</details>"
+              } >> cuerpo.md
+            fi
+          }
+          detalle "Tests (backend)" "$OUT_TESTS" informes-codigo/informe-tests.txt
+          detalle "Ruff · lint backend" "$OUT_RUFF" informes-codigo/informe-ruff.txt
+          detalle "Mypy · typecheck backend" "$OUT_MYPY" informes-codigo/informe-mypy.txt
+          detalle "Lint frontend" "$OUT_FRONTEND_LINT" informes-codigo/frontend/informe-frontend-lint.txt
+          detalle "Tests frontend" "$OUT_FRONTEND_TEST" informes-codigo/frontend/informe-frontend-test.txt
+          detalle "Build frontend" "$OUT_FRONTEND_BUILD" informes-codigo/frontend/informe-frontend-build.txt
+          detalle "Auditoría de dependencias (frontend)" "$OUT_FRONTEND_AUDIT" informes-codigo/frontend/informe-frontend-audit.txt
+
+          {
+            echo
+            echo "---"
+            echo "Commit: \`${COMMIT_SHA:0:7}\` · [ver la corrida]($RUN_URL)"
+            echo
+            echo "_Para reproducir local:_ \`uv run pytest tests/\`, \`uv run ruff check .\`, \`uv run python -m mypy .\` (backend); \`cd frontend && npm ci && npm run lint && npm run test && npm run build\` (frontend); \`make health\` (despliegue — necesita \`ON_HEALTH_URL\` exportada)."
+          } >> cuerpo.md
+
+          echo "hubo_fallo=$hubo_fallo" >> "$GITHUB_OUTPUT"
+
+      # --- Abrir / actualizar / cerrar el issue -------------------------------
+      - name: Reportar
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          HUBO_FALLO: ${{ steps.informe.outputs.hubo_fallo }}
+          SALUD_ESTADO: ${{ needs.salud.outputs.estado }}
+        with:
+          script: |
+            const fs = require("fs");
+            const ETIQUETA = "fixbot";
+            const TITULO = "🤖 Fixbot: hay algo roto en Open Notebook";
+            const huboFallo = process.env.HUBO_FALLO === "si";
+
+            // Aviso visible en el resumen de la corrida aunque no haya
+            // issue: "sin configurar" no debe pasar desapercibido como si
+            // fuera un verde real.
+            if (process.env.SALUD_ESTADO === "sin-configurar") {
+              core.warning(
+                "No está configurado el secreto ON_HEALTH_URL: el chequeo de salud del despliegue se saltea. Ver scripts/README.md."
+              );
+            }
+
+            // Un solo issue vivo por vez, buscado por etiqueta. Sin esto el
+            // bot abriría un issue nuevo cada 6 horas y el repo se llenaría
+            // de duplicados del mismo problema.
+            const { data: abiertos } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: ETIQUETA,
+              per_page: 10,
+            });
+            const existente = abiertos[0];
+
+            if (!huboFallo) {
+              if (existente) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existente.number,
+                  body: `✅ Todos los chequeos vuelven a pasar en \`${context.sha.slice(0, 7)}\`. Cierro este issue solo.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existente.number,
+                  state: "closed",
+                });
+                core.notice("Todo en orden: cerré el issue abierto del fixbot.");
+              } else {
+                core.notice("Todo en orden, no había nada que reportar.");
+              }
+              return;
+            }
+
+            const cuerpo = fs.readFileSync("cuerpo.md", "utf8");
+
+            // La etiqueta tiene que existir antes de poder usarla.
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: ETIQUETA,
+              });
+            } catch {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: ETIQUETA,
+                color: "d93f0b",
+                description: "Detectado automáticamente por el workflow Fixbot",
+              });
+            }
+
+            if (existente) {
+              // Actualizamos el cuerpo (para que arriba de todo siempre esté
+              // el estado ACTUAL) y además comentamos, para que quien esté
+              // suscripto reciba la notificación.
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existente.number,
+                body: cuerpo,
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existente.number,
+                body: `🔁 Sigue roto en \`${context.sha.slice(0, 7)}\`. Actualicé la descripción con el diagnóstico de esta corrida.`,
+              });
+              core.setFailed(`El fixbot encontró problemas — ver #${existente.number}`);
+            } else {
+              const { data: nuevo } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: TITULO,
+                body: cuerpo,
+                labels: [ETIQUETA],
+              });
+              core.setFailed(`El fixbot encontró problemas — abrí #${nuevo.number}`);
+            }
