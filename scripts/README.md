@@ -83,13 +83,14 @@ bien": en el issue aparece como *sin configurar*, no como verde ni como rojo.
 - Toda expectativa del script se verificó primero a mano contra el despliegue
   real: si un chequeo falla, falla porque la app cambió, no porque la
   expectativa fuera inventada.
-- **En este repo la rama por defecto es `main`, pero el trabajo vive en
-  `master`.** Los workflows con `schedule` corren SOLO desde la rama por
-  defecto, así que mientras siga así el Fixbot no se dispara ni aparece su
-  botón *Run workflow*. Arreglo recomendado (un clic): *Settings → General →
-  Default branch → `master`*; de paso los tests del repo empiezan a correr
-  sobre el trabajo propio, que hoy tampoco pasa (`test.yml` también se dispara
-  sólo en `main`, y este fork no tiene ni una corrida en su historial).
+- **Sobre las ramas de este repo (resuelto el 2026-09-12).** El trabajo vive
+  en `master`, pero la rama por defecto era `main` (un snapshot del upstream).
+  Los workflows con `schedule` corren SÓLO desde la rama por defecto, así que
+  el Fixbot no se habría disparado nunca: se cambió la rama por defecto a
+  `master` y quedó `state=active`. Cuidado con la parte que no es obvia: eso
+  **no** hizo correr `test.yml`, cuyo filtro `branches:` es literal y decía
+  sólo `main` — hubo que agregarle `master` por separado. Antes de ese día este
+  fork no tenía **ni una sola corrida de workflow** en su historial.
 - GitHub deshabilita los workflows programados en los repos que son fork, y
   también en los repos públicos tras 60 días sin actividad. Si el Fixbot deja
   de correr solo, ése es el motivo — el botón *Run workflow* de la pestaña
