@@ -80,10 +80,12 @@ name: Fixbot
 # aparece el botón "Run workflow". Verificado: este fork no tiene ni una
 # corrida de workflow en todo su historial, porque `test.yml` también se
 # dispara sólo en `main` y nadie empuja ahí.
-# Arreglo recomendado (un clic, reversible): Settings → General → Default
-# branch → `master`. De paso, los tests del repo empiezan a correr de verdad
-# sobre el trabajo propio. La alternativa es mergear este archivo también en
-# `main`.
+# RESUELTO el 2026-09-12: la rama por defecto del repo pasó a ser `master`
+# (Settings → General → Default branch), así que el `schedule` de acá se
+# dispara — verificado: `state=active`, y la primera corrida manual dio 15/15.
+# Ojo con la conclusión de al lado: cambiar la rama por defecto NO alcanzaba
+# para `test.yml`, cuyo filtro `branches:` es literal y decía sólo `main`; eso
+# se arregló aparte agregándole `master`.
 #
 # GOTCHA REAL (no es un bug de este archivo): GitHub deshabilita los
 # workflows con `schedule` automáticamente (a) en cualquier repo que sea un
