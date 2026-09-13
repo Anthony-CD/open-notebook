@@ -36,7 +36,7 @@ describe('AskAcrossSourcesDialog polling', () => {
 
   it('keeps polling every 3s while the job is running, not just once', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    vi.mocked(commandsApi.submit).mockResolvedValue({ job_id: 'job:1', status: 'submitted' })
+    vi.mocked(commandsApi.submit).mockResolvedValue({ job_id: 'job:1', status: 'submitted', message: '' })
     vi.mocked(commandsApi.getStatus).mockResolvedValue({
       job_id: 'job:1',
       status: 'running',
@@ -60,7 +60,7 @@ describe('AskAcrossSourcesDialog polling', () => {
       })
     }
 
-    expect(commandsApi.getStatus.mock.calls.length).toBeGreaterThan(1)
+    expect(vi.mocked(commandsApi.getStatus).mock.calls.length).toBeGreaterThan(1)
 
     vi.useRealTimers()
   })
