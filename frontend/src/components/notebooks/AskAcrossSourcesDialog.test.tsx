@@ -50,7 +50,7 @@ describe('AskAcrossSourcesDialog', () => {
   })
 
   it('submits the selected sources as "full content" and the rest as "not in"', async () => {
-    vi.mocked(commandsApi.submit).mockResolvedValue({ job_id: 'job:1', status: 'submitted' })
+    vi.mocked(commandsApi.submit).mockResolvedValue({ job_id: 'job:1', status: 'submitted', message: '' })
 
     renderDialog('notebook:1')
 
