@@ -1,0 +1,17 @@
+-- Migration 28 rollback: drop the honest-cost fields from usage_event and
+-- restore estimated_cost_usd to a non-optional float with DEFAULT 0.
+-- Unknown costs (NONE) have to become 0 again to satisfy the old type -
+-- this reintroduces the pre-28 "unknown shown as $0" behavior by design.
+
+REMOVE INDEX IF EXISTS idx_usage_event_model_name ON TABLE usage_event;
+
+REMOVE FIELD IF EXISTS cost_status ON TABLE usage_event;
+REMOVE FIELD IF EXISTS pricing_version ON TABLE usage_event;
+REMOVE FIELD IF EXISTS cached_input_tokens ON TABLE usage_event;
+REMOVE FIELD IF EXISTS failed ON TABLE usage_event;
+REMOVE FIELD IF EXISTS error_type ON TABLE usage_event;
+
+UPDATE usage_event SET estimated_cost_usd = 0.0 WHERE estimated_cost_usd = NONE;
+UPDATE usage_event UNSET cost_status, pricing_version, cached_input_tokens, failed, error_type;
+
+DEFINE FIELD OVERWRITE estimated_cost_usd ON TABLE usage_event TYPE float DEFAULT 0;

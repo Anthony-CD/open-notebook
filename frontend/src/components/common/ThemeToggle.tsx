@@ -23,7 +23,8 @@ export function ThemeToggle({ iconOnly = false }: ThemeToggleProps) {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button 
-          variant={iconOnly ? "ghost" : "outline"} 
+          variant={iconOnly ? "ghost" : "outline"}
+          aria-label={iconOnly ? t('navigation.theme') : undefined}
           size={iconOnly ? "icon" : "default"} 
           className={iconOnly ? "h-9 w-full sidebar-menu-item" : "w-full justify-start gap-2 sidebar-menu-item"}
         >
@@ -31,8 +32,10 @@ export function ThemeToggle({ iconOnly = false }: ThemeToggleProps) {
             <Sun className="absolute inset-0 h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
             <Moon className="absolute inset-0 h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
           </div>
+          {/* One accessible name only: the visible label when expanded, an
+              aria-label when icon-only. Rendering both produced "Tema Tema"
+              / "Idioma Cambiar idioma" for screen readers and text copy. */}
           {!iconOnly && <span>{t('common.theme')}</span>}
-          <span className="sr-only">{t('navigation.theme')}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">

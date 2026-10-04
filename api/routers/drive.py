@@ -10,7 +10,7 @@ them to the right HTTP status (AuthenticationError->401,
 ConfigurationError->422, ExternalServiceError->502, NotFoundError->404).
 """
 
-from urllib.parse import quote
+from typing import Optional
 
 from fastapi import APIRouter, Query
 from fastapi.responses import RedirectResponse
@@ -39,21 +39,55 @@ async def get_auth_url():
 
 
 @router.get("/drive/callback")
-async def oauth_callback(code: str = Query(...)):
-    """OAuth redirect target: Google sends the browser here with `code`.
+async def oauth_callback(
+    code: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+):
+    """OAuth redirect target: Google sends the browser here with `code`, or
+    with `error` (e.g. `access_denied` when the user clicks Cancel) and NO
+    code - so `code` must be optional or a cancelled consent would 422.
 
     This always redirects the browser back to the frontend Settings page
-    (relative path, same pattern the frontend itself uses for same-origin
-    proxying - see frontend/src/app/config/route.ts) rather than returning
-    JSON, since a browser navigation landing here should never show a raw
-    API error. Failures are surfaced via a `drive=error` query param instead.
+    rather than returning JSON, since a browser navigation landing here
+    should never show a raw API error. Outcome is signalled via
+    `drive=connected|cancelled|error` (+ `message` for errors).
     """
+    if error:
+        if error == "access_denied":
+            return RedirectResponse(
+                url=drive_service.frontend_settings_url({"drive": "cancelled"})
+            )
+        logger.warning(f"Google Drive OAuth callback returned error={error}")
+        return RedirectResponse(
+            url=drive_service.frontend_settings_url(
+                {"drive": "error", "message": f"Google: {error}"}
+            )
+        )
+    if not code:
+        return RedirectResponse(
+            url=drive_service.frontend_settings_url(
+                {"drive": "error", "message": "Missing authorization code"}
+            )
+        )
     try:
         await drive_service.handle_oauth_callback(code)
     except OpenNotebookError as e:
         logger.warning(f"Google Drive OAuth callback failed: {e}")
-        return RedirectResponse(url=f"/settings?drive=error&message={quote(str(e))}")
-    return RedirectResponse(url="/settings?drive=connected")
+        return RedirectResponse(
+            url=drive_service.frontend_settings_url(
+                {"drive": "error", "message": str(e)}
+            )
+        )
+    except Exception as e:
+        # e.g. DB write failure - still send the browser back with a clear
+        # error instead of a raw 500 page and a half-finished connection.
+        logger.exception(f"Unexpected error in Google Drive OAuth callback: {e}")
+        return RedirectResponse(
+            url=drive_service.frontend_settings_url(
+                {"drive": "error", "message": "Unexpected error while saving the connection"}
+            )
+        )
+    return RedirectResponse(url=drive_service.frontend_settings_url({"drive": "connected"}))
 
 
 @router.get("/drive/status", response_model=DriveStatusResponse)

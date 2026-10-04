@@ -14,6 +14,7 @@ export function useAuth() {
     checkAuth,
     checkAuthRequired,
     error,
+    errorParams,
     hasHydrated,
     authRequired
   } = useAuthStore()
@@ -62,6 +63,7 @@ export function useAuth() {
     isAuthenticated,
     isLoading: isLoading || !hasHydrated, // Treat lack of hydration as loading
     error,
+    errorParams,
     login: handleLogin,
     logout: handleLogout
   }

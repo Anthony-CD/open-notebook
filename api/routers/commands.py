@@ -120,22 +120,51 @@ async def list_command_jobs(
         )
 
 
-@router.delete("/commands/jobs/{job_id}")
-async def cancel_command_job(job_id: str):
-    """Cancel a running command job"""
-    try:
-        success = await CommandService.cancel_command_job(job_id)
-        return {"job_id": job_id, "cancelled": success}
+class CommandJobCancelResponse(BaseModel):
+    job_id: str
+    status: str
+    canceled: bool
 
-    except HTTPException:
-        raise
-    except OpenNotebookError:
+
+async def _cancel_job(job_id: str) -> CommandJobCancelResponse:
+    try:
+        outcome = await CommandService.cancel_command_job(job_id)
+    except (HTTPException, OpenNotebookError):
         raise
     except Exception as e:
-        logger.error(f"Error cancelling command job: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail="Failed to cancel command job"
+        logger.error(f"Error cancelling command job {job_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to cancel command job")
+
+    if not outcome["canceled"]:
+        # Running jobs cannot be interrupted (surreal_commands has no
+        # cancellation support); finished jobs have nothing to cancel.
+        detail = (
+            "Job is already running and cannot be canceled"
+            if outcome["status"] == "processing"
+            else "Job has already finished"
         )
+        raise HTTPException(status_code=409, detail=detail)
+    return CommandJobCancelResponse(**outcome)
+
+
+@router.post(
+    "/commands/jobs/{job_id}/cancel", response_model=CommandJobCancelResponse
+)
+async def cancel_command_job(job_id: str):
+    """Cancel a queued command job.
+
+    Only jobs still waiting in the queue can be canceled; running or finished
+    jobs return 409. Canceling an already-canceled job succeeds (idempotent).
+    """
+    return await _cancel_job(job_id)
+
+
+@router.delete(
+    "/commands/jobs/{job_id}", response_model=CommandJobCancelResponse
+)
+async def cancel_command_job_legacy(job_id: str):
+    """Legacy alias of ``POST /commands/jobs/{job_id}/cancel``."""
+    return await _cancel_job(job_id)
 
 
 @router.get("/commands/registry/debug")

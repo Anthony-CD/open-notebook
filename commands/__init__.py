@@ -8,6 +8,12 @@ from open_notebook.utils.proxy import ensure_internal_no_proxy
 
 ensure_internal_no_proxy()
 
+# Skip jobs canceled while queued (POST /api/commands/jobs/{id}/cancel);
+# surreal_commands itself has no cancellation support.
+from .cancel_guard import install_cancel_guard
+
+install_cancel_guard()
+
 from .ask_sources_command import ask_across_sources_command
 from .embedding_commands import (
     embed_insight_command,

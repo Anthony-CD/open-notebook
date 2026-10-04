@@ -8,7 +8,13 @@ interface AuthState {
   isAuthenticated: boolean
   token: string | null
   isLoading: boolean
+  /**
+   * i18n key (e.g. 'auth.invalidPassword') - never a display string. The UI
+   * renders it with t(error, errorParams) so login errors follow the
+   * selected language.
+   */
   error: string | null
+  errorParams: Record<string, string | number> | null
   lastAuthCheck: number | null
   isCheckingAuth: boolean
   hasHydrated: boolean
@@ -27,6 +33,7 @@ export const useAuthStore = create<AuthState>()(
       token: null,
       isLoading: false,
       error: null,
+      errorParams: null,
       lastAuthCheck: null,
       isCheckingAuth: false,
       hasHydrated: false,
@@ -57,7 +64,8 @@ export const useAuthStore = create<AuthState>()(
           // If it's a network error, set a more helpful error message
           if (axios.isAxiosError(error) && !error.response) {
             set({
-              error: 'Unable to connect to server. Please check if the API is running.',
+              error: 'auth.connectErrorHint',
+              errorParams: null,
               authRequired: null  // Don't assume auth is required if we can't connect
             })
           } else {
@@ -71,7 +79,7 @@ export const useAuthStore = create<AuthState>()(
       },
 
       login: async (password: string) => {
-        set({ isLoading: true, error: null })
+        set({ isLoading: true, error: null, errorParams: null })
         try {
           const apiUrl = await getApiUrl()
 
@@ -92,23 +100,27 @@ export const useAuthStore = create<AuthState>()(
               token: password, 
               isLoading: false,
               lastAuthCheck: Date.now(),
-              error: null
+              error: null,
+              errorParams: null
             })
             return true
           } else {
-            let errorMessage = 'Authentication failed'
+            let errorKey: string
+            let errorParams: Record<string, string | number> | null = null
             if (response.status === 401) {
-              errorMessage = 'Invalid password. Please try again.'
+              errorKey = 'auth.invalidPassword'
             } else if (response.status === 403) {
-              errorMessage = 'Access denied. Please check your credentials.'
+              errorKey = 'auth.accessDenied'
             } else if (response.status >= 500) {
-              errorMessage = 'Server error. Please try again later.'
+              errorKey = 'auth.serverError'
             } else {
-              errorMessage = `Authentication failed (${response.status})`
+              errorKey = 'auth.authFailedStatus'
+              errorParams = { status: response.status }
             }
-            
-            set({ 
-              error: errorMessage,
+
+            set({
+              error: errorKey,
+              errorParams,
               isLoading: false,
               isAuthenticated: false,
               token: null
@@ -117,18 +129,21 @@ export const useAuthStore = create<AuthState>()(
           }
         } catch (error) {
           console.error('Network error during auth:', error)
-          let errorMessage = 'Authentication failed'
-          
+          let errorKey: string
+          let errorParams: Record<string, string | number> | null = null
+
           if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-            errorMessage = 'Unable to connect to server. Please check if the API is running.'
+            errorKey = 'auth.connectErrorHint'
           } else if (error instanceof Error) {
-            errorMessage = `Network error: ${error.message}`
+            errorKey = 'auth.networkError'
+            errorParams = { message: error.message }
           } else {
-            errorMessage = 'An unexpected error occurred during authentication'
+            errorKey = 'auth.unexpectedError'
           }
-          
-          set({ 
-            error: errorMessage,
+
+          set({
+            error: errorKey,
+            errorParams,
             isLoading: false,
             isAuthenticated: false,
             token: null
@@ -138,10 +153,11 @@ export const useAuthStore = create<AuthState>()(
       },
       
       logout: () => {
-        set({ 
-          isAuthenticated: false, 
-          token: null, 
-          error: null 
+        set({
+          isAuthenticated: false,
+          token: null,
+          error: null,
+          errorParams: null
         })
       },
       

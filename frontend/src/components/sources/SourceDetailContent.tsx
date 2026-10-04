@@ -15,6 +15,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { ContentUnavailable } from '@/components/common/ContentUnavailable'
 import { isNotFoundError } from '@/lib/utils/error-handler'
 import { InlineEdit } from '@/components/common/InlineEdit'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
@@ -114,6 +115,7 @@ function SourceDetailContentInner({
   const [selectedInsight, setSelectedInsight] = useState<SourceInsightResponse | null>(null)
   const [insightToDelete, setInsightToDelete] = useState<string | null>(null)
   const [deletingInsight, setDeletingInsight] = useState(false)
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
 
   // A 404 means the source was deleted (e.g. a dangling chat/ask reference) —
   // handled by the shared "content no longer exists" state. The global query
@@ -370,19 +372,24 @@ function SourceDetailContentInner({
     return getYouTubeVideoId(externalHref)
   }, [externalHref])
 
-  const handleDelete = async () => {
+  // Opens the in-app (translated) confirmation instead of window.confirm(),
+  // whose OK/Cancel buttons follow the browser's language, not the app's.
+  const handleDelete = () => {
     if (!source) return
+    setConfirmDeleteOpen(true)
+  }
 
-    if (confirm(t('sources.deleteSourceConfirm') || t('common.confirm'))) {
-      try {
-        // The mutation hook shows the toasts and invalidates the source
-        // queries, so a reopened dialog can't serve the deleted source from
-        // the cache.
-        await deleteSource.mutateAsync(source.id)
-        onClose?.()
-      } catch (error) {
-        console.error('Failed to delete source:', error)
-      }
+  const handleConfirmDelete = async () => {
+    if (!source) return
+    try {
+      // The mutation hook shows the toasts and invalidates the source
+      // queries, so a reopened dialog can't serve the deleted source from
+      // the cache.
+      await deleteSource.mutateAsync(source.id)
+      setConfirmDeleteOpen(false)
+      onClose?.()
+    } catch (error) {
+      console.error('Failed to delete source:', error)
     }
   }
 
@@ -841,6 +848,17 @@ function SourceDetailContentInner({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        onOpenChange={setConfirmDeleteOpen}
+        title={t('sources.delete')}
+        description={t('sources.deleteSourceConfirm')}
+        confirmText={t('common.delete')}
+        confirmVariant="destructive"
+        onConfirm={() => void handleConfirmDelete()}
+        isLoading={deleteSource.isPending}
+      />
     </div>
   )
 }

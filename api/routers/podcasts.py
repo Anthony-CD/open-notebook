@@ -14,6 +14,7 @@ from open_notebook.ai.models import Model
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.podcasts.audio_paths import resolve_contained_audio_path
 from open_notebook.podcasts.models import PodcastEpisode
+from open_notebook.utils.job_status import normalize_job_status, sanitize_job_error
 
 router = APIRouter()
 
@@ -208,8 +209,8 @@ async def list_podcast_episodes():
             if episode.command:
                 detail = details_by_command.get(str(episode.command))
                 if detail is not None:
-                    job_status = detail["status"]
-                    error_message = detail["error_message"]
+                    job_status = normalize_job_status(detail["status"])
+                    error_message = sanitize_job_error(detail["error_message"])
                 else:
                     job_status = "unknown"
             else:
@@ -271,8 +272,8 @@ async def get_podcast_episode(episode_id: str):
         if episode.command:
             try:
                 detail = await episode.get_job_detail()
-                job_status = detail["status"]
-                error_message = detail["error_message"]
+                job_status = normalize_job_status(detail["status"])
+                error_message = sanitize_job_error(detail["error_message"])
             except Exception:
                 job_status = "unknown"
         else:
@@ -360,10 +361,11 @@ async def retry_podcast_episode(episode_id: str):
 
         # Validate episode is in a failed state
         detail = await episode.get_job_detail()
-        if detail["status"] not in ("failed", "error"):
+        current_status = normalize_job_status(detail["status"])
+        if current_status not in ("failed", "canceled"):
             raise HTTPException(
                 status_code=400,
-                detail=f"Episode is not in a failed state (current: {detail['status']})",
+                detail=f"Episode is not in a failed state (current: {current_status})",
             )
 
         # Extract params for re-submission

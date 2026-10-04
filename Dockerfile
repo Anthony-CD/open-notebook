@@ -105,6 +105,13 @@ ENV VIRTUAL_ENV=/app/.venv
 ENV TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
 # Bind the API to all interfaces (IPv4). Set API_HOST=:: for IPv6 dual-stack environments
 ENV API_HOST=0.0.0.0
+# Optional build metadata reported by GET /api/config (authenticated only).
+# Empty by default; pass e.g. --build-arg GIT_COMMIT_SHA=$(git rev-parse --short HEAD)
+# (.git is excluded from the build context, so the API can't read it itself).
+ARG APP_VERSION=""
+ARG GIT_COMMIT_SHA=""
+ENV APP_VERSION=${APP_VERSION}
+ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 
 # Caches for the opt-in heavy extraction runtimes (Docling, Crawl4AI local).
 # These live UNDER /app/data so the user's volume mount persists them across

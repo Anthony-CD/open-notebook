@@ -69,6 +69,7 @@ release-stack-down:
 docker-build-local:
 	@echo "🔨 Building production image locally ($(shell uname -m))..."
 	docker build \
+		--build-arg GIT_COMMIT_SHA=$(shell git rev-parse --short HEAD 2>/dev/null) \
 		-t $(DOCKERHUB_IMAGE):$(VERSION) \
 		-t $(DOCKERHUB_IMAGE):local \
 		.

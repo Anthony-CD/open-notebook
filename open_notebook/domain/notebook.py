@@ -438,8 +438,13 @@ class Source(ObjectModel):
         try:
             from surreal_commands import get_command_status
 
+            from open_notebook.utils.job_status import normalize_job_status
+
             status = await get_command_status(str(self.command))
-            return status.status if status else "unknown"
+            # Public vocabulary (queued/processing/completed/failed/canceled/
+            # unknown) - never the raw CommandStatus enum, whose str() is
+            # "CommandStatus.NEW" on Python 3.11+.
+            return normalize_job_status(status.status if status else None)
         except Exception as e:
             logger.warning(f"Failed to get command status for {self.command}: {e}")
             return "unknown"
@@ -462,12 +467,21 @@ class Source(ObjectModel):
                 result.get("execution_metadata", {}) if isinstance(result, dict) else {}
             )
 
+            from open_notebook.utils.job_status import (
+                normalize_job_status,
+                sanitize_job_error,
+            )
+
+            # Only client-safe fields: no raw command result payload (it can
+            # carry internal data) and a sanitized error. surreal_commands
+            # exposes no progress value, so none is reported here.
             return {
-                "status": status_result.status,
+                "status": normalize_job_status(status_result.status),
                 "started_at": execution_metadata.get("started_at"),
                 "completed_at": execution_metadata.get("completed_at"),
-                "error": getattr(status_result, "error_message", None),
-                "result": result,
+                "error": sanitize_job_error(
+                    getattr(status_result, "error_message", None)
+                ),
             }
         except Exception as e:
             logger.warning(f"Failed to get command progress for {self.command}: {e}")

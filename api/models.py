@@ -809,21 +809,95 @@ class NotebookDeleteResponse(BaseModel):
 
 
 # Usage tracking API models
-class UsageSummaryResponse(BaseModel):
-    """Aggregated LLM usage/cost for a period (GET /api/usage/summary)."""
-
-    total_cost_usd: float = Field(
-        ..., description="Total estimated cost in USD for the period"
+class UsagePeriodInfo(BaseModel):
+    preset: str = Field(
+        ..., description="7d | 30d | 365d | all | custom (legacy month=30d, year=365d)"
     )
+    from_: Optional[str] = Field(
+        None, alias="from", description="ISO start of the range (None = beginning)"
+    )
+    to: Optional[str] = Field(None, description="ISO end of the range (None = now)")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class UsageTokenTotals(BaseModel):
+    input: int = Field(..., description="Total input tokens (includes cache reads)")
+    output: int = Field(..., description="Total output tokens")
+    cached_input: int = Field(
+        ..., description="Cache-read input tokens (only from providers that report it)"
+    )
+    cached_input_reported_events: int = Field(
+        ..., description="Number of events whose provider reported cache reads"
+    )
+    embedding: Optional[int] = Field(
+        None, description="Embedding tokens; None when embeddings are not tracked"
+    )
+    embeddings_tracked: bool = Field(
+        ..., description="Whether embedding calls are recorded at all"
+    )
+
+
+class UsageCostTotals(BaseModel):
+    known_usd: float = Field(
+        ..., description="Sum of costs that are known (paid known prices + free=0)"
+    )
+    known_cost_events: int
+    free_events: int
+    unknown_cost_events: int = Field(
+        ..., description="Events whose price is unknown (excluded from known_usd)"
+    )
+    unknown_cost_input_tokens: int
+    unknown_cost_output_tokens: int
+    is_complete: bool = Field(
+        ..., description="True when no event in the selection has an unknown cost"
+    )
+
+
+class UsageBreakdownItem(BaseModel):
+    key: str
+    provider: Optional[str] = None
+    event_count: int
+    failed_count: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    cost_known_usd: float
+    known_cost_events: int
+    free_events: int
+    unknown_cost_events: int
+
+
+class UsageFilterOptions(BaseModel):
+    models: List[str] = Field(default_factory=list)
+    providers: List[str] = Field(default_factory=list)
+    task_types: List[str] = Field(default_factory=list)
+
+
+class UsageSummaryResponse(BaseModel):
+    """Aggregated LLM usage/cost (GET /api/usage/summary).
+
+    Single source of truth: usage_event rows. Unknown prices are never
+    counted as $0 - see `cost.unknown_cost_events`.
+    """
+
+    event_count: int = Field(..., description="Number of LLM calls in the selection")
+    failed_count: int = Field(..., description="Calls that ended in an error")
+    period: UsagePeriodInfo
+    generated_at: str = Field(..., description="ISO timestamp when computed")
+    tokens: UsageTokenTotals
+    cost: UsageCostTotals
     budget_usd: float = Field(
         ..., description="Configured budget in USD (STUDY_BUDGET_USD, default 10.0)"
     )
-    by_task_type: Dict[str, float] = Field(
-        default_factory=dict,
-        description="Estimated cost in USD grouped by task_type (chat, transformation, ...)",
+    by_provider: List[UsageBreakdownItem] = Field(default_factory=list)
+    by_model: List[UsageBreakdownItem] = Field(default_factory=list)
+    by_task_type: List[UsageBreakdownItem] = Field(default_factory=list)
+    filter_options: UsageFilterOptions
+    applied_filters: Dict[str, Optional[str]] = Field(default_factory=dict)
+    pricing_table_version: str = Field(
+        ..., description="Version of the static price table in effect"
     )
-    input_tokens: int = Field(..., description="Total input tokens for the period")
-    output_tokens: int = Field(..., description="Total output tokens for the period")
 
 
 # Study Tools API models (flashcards + quiz generation)
@@ -953,9 +1027,27 @@ class DriveAuthUrlResponse(BaseModel):
 class DriveStatusResponse(BaseModel):
     """Response for GET /drive/status."""
 
-    connected: bool = Field(..., description="Whether a Drive account is connected")
+    connected: bool = Field(
+        ..., description="Whether a usable Drive connection exists (read from the DB)"
+    )
+    configured: bool = Field(
+        True, description="Whether the GOOGLE_DRIVE_* OAuth env vars are set"
+    )
     account_email: Optional[str] = Field(
         None, description="Connected Google account email, for display"
+    )
+    granted_scopes: List[str] = Field(
+        default_factory=list, description="OAuth scopes Google granted"
+    )
+    connected_at: Optional[str] = Field(None, description="ISO datetime of connection")
+    last_sync_at: Optional[str] = Field(
+        None, description="ISO datetime of the last successful list/import"
+    )
+    needs_reconnect: bool = Field(
+        False, description="Grant revoked/expired or Drive scope missing"
+    )
+    reconnect_reason: Optional[str] = Field(
+        None, description="'revoked' | 'missing_scope' when needs_reconnect"
     )
 
 

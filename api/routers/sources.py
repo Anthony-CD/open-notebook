@@ -42,8 +42,37 @@ from open_notebook.exceptions import (
     OpenNotebookError,
     UnsupportedTypeException,
 )
+from open_notebook.utils.job_status import (
+    ACTIVE_JOB_STATUSES,
+    normalize_job_status,
+    sanitize_job_error,
+)
 
 router = APIRouter()
+
+# Human-readable (English) message per public job status. The frontend
+# renders its own localized label from ``status``; this text is only for API
+# consumers and must never contain enum reprs or internal error text.
+SOURCE_STATUS_MESSAGES = {
+    "queued": "Source processing queued",
+    "processing": "Source processing in progress",
+    "completed": "Source processing completed successfully",
+    "failed": "Source processing failed",
+    "canceled": "Source processing canceled",
+    "unknown": "Source processing status unknown",
+}
+
+# Per-source locks so two concurrent retry requests (double click) can't both
+# pass the "already processing?" check and enqueue two jobs. Single API
+# process; the status check below is the cross-process guard.
+_retry_locks: dict[str, asyncio.Lock] = {}
+
+
+def _retry_lock(source_id: str) -> asyncio.Lock:
+    lock = _retry_locks.get(source_id)
+    if lock is None:
+        lock = _retry_locks[source_id] = asyncio.Lock()
+    return lock
 
 
 async def _assert_file_supported(file_path: str) -> None:
@@ -73,15 +102,15 @@ async def _assert_file_supported(file_path: str) -> None:
 
 
 def _truncate_error(msg: Optional[str], limit: int = 200) -> Optional[str]:
-    """Cap error text surfaced to clients.
+    """Make error text surfaced to clients safe.
 
     Command/processing failures can carry arbitrary internal exception text;
-    return at most ``limit`` characters so a raw traceback message can't leak
-    to the API response. ``None`` passes through unchanged.
+    strip tracebacks, redact credentials and cap at ``limit`` characters (see
+    ``sanitize_job_error``). ``None``/empty passes through unchanged.
     """
     if not msg:
         return msg
-    return msg if len(msg) <= limit else msg[:limit] + "…"
+    return sanitize_job_error(msg, limit=limit)
 
 
 SOURCE_SORT_FIELDS = {
@@ -328,7 +357,7 @@ async def get_sources(
             # Extract status from fetched command object (already resolved by FETCH)
             if command and isinstance(command, dict):
                 command_id = str(command.get("id")) if command.get("id") else None
-                status = command.get("status")
+                status = normalize_job_status(command.get("status"))
                 # Extract execution metadata from nested result structure
                 result_data = command.get("result")
                 execution_metadata = (
@@ -540,7 +569,7 @@ async def _create_source_async_path(
             embedded=False,  # Will be updated after processing
             embedded_chunks=0,
             command_id=command_id,
-            status="new",
+            status="queued",
             processing_info={"async": True, "queued": True},
         )
 
@@ -863,19 +892,10 @@ async def get_source_status(source_id: str):
             status = await source.get_status()
             processing_info = await source.get_processing_progress()
 
-            # Generate descriptive message based on status
-            if status == "completed":
-                message = "Source processing completed successfully"
-            elif status == "failed":
-                message = "Source processing failed"
-            elif status == "running":
-                message = "Source processing in progress"
-            elif status == "queued":
-                message = "Source processing queued"
-            elif status == "unknown":
-                message = "Source processing status unknown"
-            else:
-                message = f"Source processing status: {status}"
+            # Normalize again defensively: get_status() is mockable/overridable
+            # and a raw CommandStatus would render as "CommandStatus.NEW".
+            status = normalize_job_status(status)
+            message = SOURCE_STATUS_MESSAGES[status]
 
             return SourceStatusResponse(
                 status=status,
@@ -933,27 +953,45 @@ async def update_source(source_id: str, source_update: SourceUpdate):
 
 @router.post("/sources/{source_id}/retry", response_model=SourceResponse)
 async def retry_source_processing(source_id: str):
-    """Retry processing for a failed or stuck source."""
+    """Retry processing for a failed, canceled or stuck source.
+
+    Idempotent: if the source's current job is still queued or processing
+    (e.g. a double click), no new job is enqueued and the existing job is
+    returned unchanged.
+    """
+    async with _retry_lock(source_id):
+        return await _retry_source_processing_locked(source_id)
+
+
+async def _retry_source_processing_locked(source_id: str):
     try:
         # First, verify source exists
         source = await Source.get(source_id)
         if not source:
             raise HTTPException(status_code=404, detail="Source not found")
 
-        # Check if source already has a running command
+        # If a job for this source is already active, return it instead of
+        # enqueuing a duplicate.
         if source.command:
             try:
-                status = await source.get_status()
-                if status in ["running", "queued"]:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Source is already processing. Cannot retry while processing is active.",
-                    )
+                current_status = normalize_job_status(await source.get_status())
             except Exception as e:
                 logger.warning(
                     f"Failed to check current status for source {source_id}: {e}"
                 )
-                # Continue with retry if we can't check status
+                current_status = "unknown"  # Continue with retry
+            if current_status in ACTIVE_JOB_STATUSES:
+                logger.info(
+                    f"Retry for source {source_id} ignored: job {source.command} "
+                    f"is already {current_status}"
+                )
+                return _source_to_response(
+                    source,
+                    embedded_chunks=await source.get_embedded_chunks(),
+                    command_id=str(source.command),
+                    status=current_status,
+                    processing_info={"retry": False, "already_active": True},
+                )
 
         # Get notebooks that this source belongs to. `reference` is a graph edge
         # (RELATE source->reference->notebook), so it only has `in`/`out` columns —

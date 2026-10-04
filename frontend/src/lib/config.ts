@@ -4,12 +4,39 @@
  */
 
 import { AppConfig, BackendConfigResponse } from '@/lib/types/config'
+import { getAuthToken } from '@/lib/auth-token'
 
 // Build timestamp for debugging - set at build time
 const BUILD_TIME = new Date().toISOString()
 
+// Upper bounds for the startup config fetches. Without them a hung request
+// (e.g. the backend waiting on its GitHub version check) left ConnectionGuard
+// "checking" forever; with them it falls through to the error overlay.
+const RUNTIME_CONFIG_TIMEOUT_MS = 5_000
+const BACKEND_CONFIG_TIMEOUT_MS = 20_000
+
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(ms)
+    : undefined
+}
+
 let config: AppConfig | null = null
 let configPromise: Promise<AppConfig> | null = null
+// Auth token the cached config was fetched with. /api/config only reports the
+// version to authenticated callers, so a config cached before login (e.g. by
+// ConnectionGuard or the login page) has no version; refetch once a token
+// shows up instead of keeping that versionless config for the whole session.
+let configToken: string | null = null
+
+function dropStaleVersionlessConfig(): void {
+  if (!config || config.version) return
+  const token = getAuthToken()
+  if (token && token !== configToken) {
+    config = null
+    configPromise = null
+  }
+}
 
 /**
  * Get the API URL to use for requests.
@@ -41,6 +68,7 @@ export async function getApiUrl(): Promise<string> {
  * Get the full configuration.
  */
 export async function getConfig(): Promise<AppConfig> {
+  dropStaleVersionlessConfig()
   if (config) {
     return config
   }
@@ -72,6 +100,7 @@ async function fetchConfig(): Promise<AppConfig> {
     if (isDev) console.log('🔧 [Config] Attempting to fetch runtime config from /config endpoint...')
     const runtimeResponse = await fetch('/config', {
       cache: 'no-store',
+      signal: timeoutSignal(RUNTIME_CONFIG_TIMEOUT_MS),
     })
     if (runtimeResponse.ok) {
       const runtimeData = await runtimeResponse.json()
@@ -113,20 +142,28 @@ async function fetchConfig(): Promise<AppConfig> {
   try {
     if (isDev) console.log('🔧 [Config] Fetching backend config from:', `${baseUrl}/api/config`)
     // Try to fetch runtime config from backend API
+    const token = getAuthToken()
     const response = await fetch(`${baseUrl}/api/config`, {
       cache: 'no-store',
+      signal: timeoutSignal(BACKEND_CONFIG_TIMEOUT_MS),
+      // The endpoint is public (dbStatus is needed pre-login) but only
+      // returns version info when the request is authenticated.
+      ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
     })
 
     if (response.ok) {
       const data: BackendConfigResponse = await response.json()
       config = {
         apiUrl: baseUrl, // Use baseUrl from runtime-config (Python no longer returns this)
-        version: data.version || 'unknown',
+        // '' = version not available (unauthenticated, or the backend could
+        // not resolve one); UI hides the field instead of showing "unknown".
+        version: typeof data.version === 'string' ? data.version.trim() : '',
         buildTime: BUILD_TIME,
         latestVersion: data.latestVersion || null,
         hasUpdate: data.hasUpdate || false,
         dbStatus: data.dbStatus, // Can be undefined for old backends
       }
+      configToken = token
       if (isDev) console.log('✅ [Config] Successfully loaded API config:', config)
       return config
     } else {
@@ -145,4 +182,5 @@ async function fetchConfig(): Promise<AppConfig> {
 export function resetConfig(): void {
   config = null
   configPromise = null
+  configToken = null
 }

@@ -17,6 +17,7 @@ from api.models import (
 from api.study_service import StudyService
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.study.models import StudySet
+from open_notebook.utils.job_status import normalize_job_status, sanitize_job_error
 
 router = APIRouter()
 
@@ -115,8 +116,8 @@ async def list_notebook_study_sets(notebook_id: str):
             if study_set.command:
                 detail = details_by_command.get(str(study_set.command))
                 if detail is not None:
-                    job_status = detail["status"]
-                    error_message = detail["error_message"]
+                    job_status = normalize_job_status(detail["status"])
+                    error_message = sanitize_job_error(detail["error_message"])
                 else:
                     job_status = "unknown"
             else:
@@ -160,8 +161,8 @@ async def get_study_set(study_set_id: str):
         if study_set.command:
             try:
                 detail = await study_set.get_job_detail()
-                job_status = detail["status"]
-                error_message = detail["error_message"]
+                job_status = normalize_job_status(detail["status"])
+                error_message = sanitize_job_error(detail["error_message"])
             except Exception:
                 job_status = "unknown"
         else:

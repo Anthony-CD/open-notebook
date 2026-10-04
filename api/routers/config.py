@@ -1,4 +1,8 @@
 import asyncio
+import functools
+import os
+import re
+import subprocess
 import time
 import tomllib
 from pathlib import Path
@@ -28,16 +32,66 @@ _version_cache: dict = {
 VERSION_CACHE_TTL = 24 * 60 * 60
 
 
-def get_version() -> str:
-    """Read version from pyproject.toml"""
+# Build-time env vars (see Dockerfile ARG/ENV APP_VERSION / GIT_COMMIT_SHA).
+APP_VERSION_ENV = "APP_VERSION"
+GIT_COMMIT_SHA_ENV = "GIT_COMMIT_SHA"
+_REPO_ROOT = Path(__file__).parent.parent.parent
+_SHORT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+def _version_from_pyproject() -> Optional[str]:
     try:
-        pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
-        with open(pyproject_path, "rb") as f:
+        with open(_REPO_ROOT / "pyproject.toml", "rb") as f:
             pyproject = tomllib.load(f)
-            return pyproject.get("project", {}).get("version", "unknown")
+        value = pyproject.get("project", {}).get("version")
+        return str(value).strip() or None if value else None
     except Exception as e:
         logger.warning(f"Could not read version from pyproject.toml: {e}")
-        return "unknown"
+        return None
+
+
+def _short_sha(value: Optional[str]) -> Optional[str]:
+    value = (value or "").strip()
+    return value[:7].lower() if _SHORT_SHA_RE.match(value) else None
+
+
+def _version_from_git() -> Optional[str]:
+    """Short commit sha via ``git rev-parse``; never raises, 2s timeout."""
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception as e:
+        logger.debug(f"git rev-parse unavailable: {e}")
+        return None
+    if completed.returncode != 0:
+        return None
+    return _short_sha(completed.stdout)
+
+
+@functools.lru_cache(maxsize=1)
+def get_version() -> str:
+    """Resolve the running app version; "" when nothing can be determined.
+
+    Order: ``APP_VERSION`` env (set at build time) -> pyproject.toml
+    ``[project].version`` -> ``GIT_COMMIT_SHA`` env (short sha) -> short sha
+    from ``git rev-parse``. Cached for the process lifetime. Never returns
+    the old "unknown" placeholder - the frontend hides an empty version.
+    """
+    env_version = (os.environ.get(APP_VERSION_ENV) or "").strip()
+    if env_version:
+        return env_version
+    return (
+        _version_from_pyproject()
+        or _short_sha(os.environ.get(GIT_COMMIT_SHA_ENV))
+        or _version_from_git()
+        or ""
+    )
 
 
 async def get_latest_version_cached(current_version: str) -> tuple[Optional[str], bool]:
@@ -145,11 +199,14 @@ async def get_config(request: Request):
 
         # Check for updates (with caching and error handling)
         # This MUST NOT break the endpoint - wrapped in try-except as extra safety
-        try:
-            latest_version, has_update = await get_latest_version_cached(current_version)
-        except Exception as e:
-            # Extra safety: ensure version check never breaks the config endpoint
-            logger.error(f"Unexpected error during version check: {e}")
+        if current_version:
+            try:
+                latest_version, has_update = await get_latest_version_cached(
+                    current_version
+                )
+            except Exception as e:
+                # Extra safety: ensure version check never breaks the config endpoint
+                logger.error(f"Unexpected error during version check: {e}")
 
     # Check database health
     db_health = await check_database_health()

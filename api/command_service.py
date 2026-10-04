@@ -3,6 +3,32 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from surreal_commands import get_command_status, submit_command
 
+from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.exceptions import InvalidInputError, NotFoundError
+from open_notebook.utils.job_status import (
+    CANCELED,
+    QUEUED,
+    normalize_job_status,
+    sanitize_job_error,
+)
+
+CANCELED_BY_USER_MESSAGE = "Canceled by user"
+
+
+def _command_record_id(job_id: str):
+    """Parse a job id and make sure it points at the ``command`` table.
+
+    The cancel path issues an UPDATE against the given record id, so it must
+    never accept ids of other tables (sources, notes, ...).
+    """
+    try:
+        record_id = ensure_record_id(job_id)
+    except Exception:
+        raise InvalidInputError("Invalid job id")
+    if getattr(record_id, "table_name", None) != "command":
+        raise InvalidInputError("Invalid job id")
+    return record_id
+
 
 class CommandService:
     """Generic service layer for command operations"""
@@ -50,11 +76,11 @@ class CommandService:
             status = await get_command_status(job_id)
             return {
                 "job_id": job_id,
-                "status": status.status if status else "unknown",
+                "status": normalize_job_status(status.status if status else None),
                 "result": status.result if status else None,
-                "error_message": getattr(status, "error_message", None)
-                if status
-                else None,
+                "error_message": sanitize_job_error(
+                    getattr(status, "error_message", None) if status else None
+                ),
                 "created": str(status.created)
                 if status and hasattr(status, "created") and status.created
                 else None,
@@ -80,13 +106,47 @@ class CommandService:
         return []
 
     @staticmethod
-    async def cancel_command_job(job_id: str) -> bool:
-        """Cancel a running command job"""
-        try:
-            # Implementation depends on surreal-commands cancellation support
-            # For now, just log the attempt
-            logger.info(f"Attempting to cancel job: {job_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to cancel command job: {e}")
-            raise
+    async def cancel_command_job(job_id: str) -> Dict[str, Any]:
+        """Cancel a queued command job.
+
+        surreal_commands has no cancellation API and no way to interrupt a
+        job that is already executing, so only jobs still waiting in the
+        queue (raw status ``new`` -> public ``queued``) can be canceled. The
+        record is flipped to ``canceled`` with a conditional UPDATE (only
+        while still ``new``) so a job that a worker picks up concurrently is
+        never marked canceled while it runs. The worker-side guard in
+        ``commands/cancel_guard.py`` skips execution of canceled records that
+        a worker had already received but not yet started.
+
+        Returns ``{"job_id", "status", "canceled"}``; ``canceled`` is False
+        when the job is running or already finished (status says which).
+        Canceling an already-canceled job is a no-op that reports success.
+        """
+        record_id = _command_record_id(job_id)
+        rows = await repo_query("SELECT id, status FROM $id", {"id": record_id})
+        if not rows:
+            raise NotFoundError("Job not found")
+
+        current = normalize_job_status(rows[0].get("status"))
+        if current == CANCELED:
+            return {"job_id": job_id, "status": CANCELED, "canceled": True}
+        if current != QUEUED:
+            return {"job_id": job_id, "status": current, "canceled": False}
+
+        updated = await repo_query(
+            "UPDATE $id SET status = 'canceled', error_message = $message "
+            "WHERE status = 'new' RETURN AFTER",
+            {"id": record_id, "message": CANCELED_BY_USER_MESSAGE},
+        )
+        if updated:
+            logger.info(f"Canceled queued command job: {job_id}")
+            return {"job_id": job_id, "status": CANCELED, "canceled": True}
+
+        # Lost the race against a worker: report the state it is in now.
+        rows = await repo_query("SELECT id, status FROM $id", {"id": record_id})
+        current = normalize_job_status(rows[0].get("status") if rows else None)
+        return {
+            "job_id": job_id,
+            "status": current,
+            "canceled": current == CANCELED,
+        }

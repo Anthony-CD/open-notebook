@@ -258,8 +258,10 @@ class PodcastEpisode(ObjectModel):
         try:
             from surreal_commands import get_command_status
 
+            from open_notebook.utils.job_status import normalize_job_status
+
             status = await get_command_status(str(self.command))
-            return status.status if status else "unknown"
+            return normalize_job_status(status.status if status else None)
         except Exception:
             return "unknown"
 
@@ -271,12 +273,19 @@ class PodcastEpisode(ObjectModel):
         try:
             from surreal_commands import get_command_status
 
+            from open_notebook.utils.job_status import (
+                normalize_job_status,
+                sanitize_job_error,
+            )
+
             status = await get_command_status(str(self.command))
             if not status:
                 return {"status": "unknown", "error_message": None}
             return {
-                "status": status.status,
-                "error_message": getattr(status, "error_message", None),
+                "status": normalize_job_status(status.status),
+                "error_message": sanitize_job_error(
+                    getattr(status, "error_message", None)
+                ),
             }
         except Exception:
             return {"status": "unknown", "error_message": None}
@@ -297,11 +306,15 @@ class PodcastEpisode(ObjectModel):
         it directly in one shot instead of looping through the library's
         per-command helper.
 
-        CommandStatus is a `str` subclass (`class CommandStatus(str, Enum)`),
-        so returning the raw DB string here is interchangeable with the
-        enum-wrapped value get_job_detail() returns for every comparison
-        this codebase does against it.
+        Statuses are normalized to the public vocabulary (queued/processing/
+        completed/failed/canceled/unknown) exactly like get_job_detail(), and
+        error messages are sanitized for clients.
         """
+        from open_notebook.utils.job_status import (
+            normalize_job_status,
+            sanitize_job_error,
+        )
+
         ids = [cid for cid in command_ids if cid]
         grouped: Dict[str, dict] = {}
         if not ids:
@@ -316,8 +329,8 @@ class PodcastEpisode(ObjectModel):
             return grouped
         for row in result:
             grouped[str(row.get("id"))] = {
-                "status": row.get("status", "unknown"),
-                "error_message": row.get("error_message"),
+                "status": normalize_job_status(row.get("status")),
+                "error_message": sanitize_job_error(row.get("error_message")),
             }
         return grouped
 

@@ -3,12 +3,11 @@
 import { useAuth } from '@/lib/hooks/use-auth'
 import { useVersionCheck } from '@/lib/hooks/use-version-check'
 import { useRouter } from 'next/navigation'
-import { useEffect, useState } from 'react'
-import { LoadingSpinner } from '@/components/common/LoadingSpinner'
-import { ErrorBoundary } from '@/components/common/ErrorBoundary'
+import { Suspense, useEffect, useState } from 'react'
 import { ModalProvider } from '@/components/providers/ModalProvider'
 import { CreateDialogsProvider } from '@/lib/hooks/use-create-dialogs'
 import { CommandPalette } from '@/components/common/CommandPalette'
+import { AppShellSkeleton } from '@/components/layout/AppShellSkeleton'
 
 export default function DashboardLayout({
   children,
@@ -37,27 +36,25 @@ export default function DashboardLayout({
     }
   }, [isAuthenticated, isLoading, router])
 
-  // Show loading spinner during initial auth check or while loading
-  if (isLoading || !hasCheckedAuth) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <LoadingSpinner />
-      </div>
-    )
+  // While the session is being restored (or we're redirecting to /login),
+  // render an AppShell-shaped skeleton rather than a spinner on white or
+  // `null` - a hard reload must never look like a blank page.
+  if (isLoading || !hasCheckedAuth || !isAuthenticated) {
+    return <AppShellSkeleton />
   }
 
-  // Don't render anything if not authenticated (during redirect)
-  if (!isAuthenticated) {
-    return null
-  }
-
+  // Page-level render errors are handled by app/(dashboard)/error.tsx
+  // (translated, with a retry that calls reset()).
   return (
-    <ErrorBoundary>
-      <CreateDialogsProvider>
-        {children}
+    <CreateDialogsProvider>
+      {children}
+      {/* ModalProvider reads ?modal= via useSearchParams(); keep it behind
+          its own Suspense boundary so it can never force a CSR bailout of
+          the whole route. */}
+      <Suspense fallback={null}>
         <ModalProvider />
-        <CommandPalette />
-      </CreateDialogsProvider>
-    </ErrorBoundary>
+      </Suspense>
+      <CommandPalette />
+    </CreateDialogsProvider>
   )
 }

@@ -11,6 +11,7 @@ from open_notebook.domain.notebook import Notebook
 from open_notebook.exceptions import InvalidInputError
 from open_notebook.study.models import FlashcardGradeResult, StudySet
 from open_notebook.utils import clean_thinking_content
+from open_notebook.utils.job_status import normalize_job_status, sanitize_job_error
 from open_notebook.utils.text_utils import extract_text_content
 
 
@@ -105,11 +106,11 @@ class StudyService:
             status = await get_command_status(job_id)
             return {
                 "job_id": job_id,
-                "status": status.status if status else "unknown",
+                "status": normalize_job_status(status.status if status else None),
                 "result": status.result if status else None,
-                "error_message": getattr(status, "error_message", None)
-                if status
-                else None,
+                "error_message": sanitize_job_error(
+                    getattr(status, "error_message", None) if status else None
+                ),
                 "created": str(status.created)
                 if status and hasattr(status, "created") and status.created
                 else None,
