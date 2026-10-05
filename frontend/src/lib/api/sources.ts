@@ -1,13 +1,15 @@
 import type { AxiosResponse } from 'axios'
 
 import apiClient from './client'
-import { 
-  SourceListResponse, 
-  SourceDetailResponse, 
+import {
+  SourceListResponse,
+  SourceDetailResponse,
   SourceResponse,
   SourceStatusResponse,
-  CreateSourceRequest, 
-  UpdateSourceRequest 
+  SourceDeletePreview,
+  SourceUploadLimits,
+  CreateSourceRequest,
+  UpdateSourceRequest
 } from '@/lib/types/api'
 
 export type SourceSortField = 'type' | 'title' | 'created' | 'updated' | 'insights_count' | 'embedded'
@@ -63,7 +65,8 @@ export const sourcesApi = {
     formData.append('embed', String(data.embed ?? false))
     formData.append('delete_source', String(data.delete_source ?? false))
     formData.append('async_processing', String(data.async_processing ?? false))
-    
+    formData.append('force_duplicate', String(data.force_duplicate ?? false))
+
     const response = await apiClient.post<SourceResponse>('/sources', formData)
     return response.data
   },
@@ -99,6 +102,41 @@ export const sourcesApi = {
 
   retry: async (id: string) => {
     const response = await apiClient.post<SourceResponse>(`/sources/${id}/retry`)
+    return response.data
+  },
+
+  archive: async (id: string) => {
+    const response = await apiClient.post<SourceResponse>(`/sources/${id}/archive`)
+    return response.data
+  },
+
+  unarchive: async (id: string) => {
+    const response = await apiClient.post<SourceResponse>(`/sources/${id}/unarchive`)
+    return response.data
+  },
+
+  deletePreview: async (id: string) => {
+    const response = await apiClient.get<SourceDeletePreview>(`/sources/${id}/delete-preview`)
+    return response.data
+  },
+
+  limits: async () => {
+    const response = await apiClient.get<SourceUploadLimits>('/sources/limits')
+    return response.data
+  },
+
+  replace: async (
+    id: string,
+    data: { type: 'link' | 'upload' | 'text'; url?: string; content?: string; file?: File; delete_source?: boolean }
+  ) => {
+    const formData = new FormData()
+    formData.append('type', data.type)
+    if (data.url) formData.append('url', data.url)
+    if (data.content) formData.append('content', data.content)
+    if (data.file) formData.append('file', data.file)
+    formData.append('delete_source', String(data.delete_source ?? false))
+
+    const response = await apiClient.post<SourceResponse>(`/sources/${id}/replace`, formData)
     return response.data
   },
 

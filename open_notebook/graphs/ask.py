@@ -13,6 +13,12 @@ from open_notebook.ai.provision import provision_langchain_model
 from open_notebook.domain.notebook import vector_search
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.utils import clean_thinking_content
+from open_notebook.utils.citations import (
+    build_references_from_search_results,
+    parse_cited_references,
+    references_to_citation_dicts,
+    render_reference_list,
+)
 from open_notebook.utils.error_classifier import classify_error
 from open_notebook.utils.text_utils import extract_text_content
 
@@ -45,7 +51,13 @@ class ThreadState(TypedDict):
     question: str
     strategy: Strategy
     answers: Annotated[list, operator.add]
+    # Raw vector_search rows gathered across every sub-query branch, used to
+    # build the final numbered reference list. Deliberately not deduplicated
+    # here (operator.add just concatenates) - build_references_from_search_
+    # results() dedupes by id when the list is actually consumed.
+    evidence: Annotated[list, operator.add]
     final_answer: str
+    citations: list
 
 
 async def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict:
@@ -105,7 +117,7 @@ async def provide_answer(state: SubGraphState, config: RunnableConfig) -> dict:
         # else:
         results = await vector_search(state["term"], 10, True, True)
         if len(results) == 0:
-            return {"answers": []}
+            return {"answers": [], "evidence": []}
         payload["results"] = results
         ids = [r["id"] for r in results]
         payload["ids"] = ids
@@ -118,7 +130,11 @@ async def provide_answer(state: SubGraphState, config: RunnableConfig) -> dict:
         )
         ai_message = await model.ainvoke(system_prompt)
         ai_content = extract_text_content(ai_message.content)
-        return {"answers": [clean_thinking_content(ai_content)]}
+        # Keep the raw retrieved rows (not just this branch's free-text
+        # answer) so write_final_answer can build one numbered reference
+        # list across every sub-query's evidence - see
+        # build_references_from_search_results().
+        return {"answers": [clean_thinking_content(ai_content)], "evidence": results}
     except OpenNotebookError:
         raise
     except Exception as e:
@@ -128,7 +144,20 @@ async def provide_answer(state: SubGraphState, config: RunnableConfig) -> dict:
 
 async def write_final_answer(state: ThreadState, config: RunnableConfig) -> dict:
     try:
-        system_prompt = Prompter(prompt_template="ask/final_answer").render(data=state)  # type: ignore[arg-type]
+        # Build one numbered reference list from every sub-query's retrieved
+        # rows (deduplicated by id) so the final answer's [n] citations can
+        # be checked against something concrete, instead of trusting
+        # whatever document ID string the model decides to repeat from the
+        # sub-answers. No chunk/page location is available here - the
+        # vector_search SQL function groups by document id and doesn't
+        # surface the embedding chunk's order - so citations from this graph
+        # are document-level only (see open_notebook/utils/citations.py).
+        references = build_references_from_search_results(state.get("evidence"))
+        rendered_references = (
+            render_reference_list(references) if references else None
+        )
+        prompt_data = {**state, "references": rendered_references}
+        system_prompt = Prompter(prompt_template="ask/final_answer").render(data=prompt_data)  # type: ignore[arg-type]
         model = await provision_langchain_model(
             system_prompt,
             config.get("configurable", {}).get("final_answer_model"),
@@ -137,7 +166,12 @@ async def write_final_answer(state: ThreadState, config: RunnableConfig) -> dict
         )
         ai_message = await model.ainvoke(system_prompt)
         final_content = extract_text_content(ai_message.content)
-        return {"final_answer": clean_thinking_content(final_content)}
+        cleaned_final = clean_thinking_content(final_content)
+        cited_references = parse_cited_references(cleaned_final, references)
+        return {
+            "final_answer": cleaned_final,
+            "citations": references_to_citation_dicts(cited_references),
+        }
     except OpenNotebookError:
         raise
     except Exception as e:

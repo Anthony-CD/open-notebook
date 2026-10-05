@@ -42,6 +42,15 @@ class SearchRequest(BaseModel):
     limit: int = Field(100, description="Maximum number of results", ge=1, le=1000)
     search_sources: bool = Field(True, description="Include sources in search")
     search_notes: bool = Field(True, description="Include notes in search")
+    search_chats: bool = Field(
+        True,
+        description=(
+            "Include chat conversation messages. Unlike sources/notes this is "
+            "always a plain case-insensitive substring match (chat history "
+            "lives outside SurrealDB, in the LangGraph checkpoint store, with "
+            "no full-text/vector index of its own) - not affected by `type`."
+        ),
+    )
     minimum_score: float = Field(
         0.2, description="Minimum score for vector search", ge=0, le=1
     )
@@ -60,9 +69,40 @@ class AskRequest(BaseModel):
     final_answer_model: str = Field(..., description="Model ID for final answer")
 
 
+class Citation(BaseModel):
+    """One structured citation backing a `[n]` marker in a chat/ask answer.
+
+    Built from what was actually retrieved for the turn (never derived from
+    the raw answer text), so the frontend can render a clickable chip without
+    re-parsing the model's own output. `location` is `None` when the source
+    type doesn't carry anything more precise than "the whole document" (no
+    page/chunk tracking exists for notebook/source chat today).
+    """
+
+    number: int = Field(..., description="The [n] bracket number cited in the answer")
+    ref_type: Literal["source", "source_insight", "note"] = Field(
+        ..., description="What kind of record this citation points to"
+    )
+    ref_id: str = Field(..., description="Full record id, e.g. 'source:abc123'")
+    title: str = Field(..., description="Display title of the cited item")
+    location: Optional[str] = Field(
+        None,
+        description="Human-readable location within the item (e.g. 'Insight: summary'), when known",
+    )
+    snippet: str = Field(..., description="Short excerpt of the cited text")
+
+
 class AskResponse(BaseModel):
     answer: str = Field(..., description="Final answer from the knowledge base")
     question: str = Field(..., description="Original question")
+    citations: List[Citation] = Field(
+        default_factory=list,
+        description=(
+            "Structured citations backing the [n] markers in `answer`. May be "
+            "empty if the graph building this response hasn't been wired to "
+            "populate it yet."
+        ),
+    )
 
 
 # Models API models
@@ -183,6 +223,100 @@ class TransformationExecuteResponse(BaseModel):
     output: str = Field(..., description="Transformed text")
     transformation_id: str = Field(..., description="ID of the transformation used")
     model_id: Optional[str] = Field(None, description="Model ID used")
+    input_tokens: Optional[int] = Field(
+        None, description="Actual input tokens reported by the provider for this run"
+    )
+    output_tokens: Optional[int] = Field(
+        None, description="Actual output tokens reported by the provider for this run"
+    )
+    cost_status: Optional[Literal["known", "free", "unknown"]] = Field(
+        None,
+        description=(
+            "Whether the real post-execution cost below is known, free, or "
+            "unknown (no price available) - never a fake $0"
+        ),
+    )
+    actual_cost_usd: Optional[float] = Field(
+        None,
+        description=(
+            "Real cost recorded for this run from its usage_event, in USD. "
+            "None when cost_status is not 'known'."
+        ),
+    )
+
+
+class TransformationPreviewRequest(BaseModel):
+    """Preview the exact prompt a transformation will send, before saving it."""
+
+    prompt: str = Field(..., description="The transformation instructions to preview")
+    sample_text: Optional[str] = Field(
+        None,
+        description=(
+            "Optional sample source content to preview interpolation with. "
+            "A generic placeholder is used when omitted."
+        ),
+    )
+
+
+class TransformationPreviewResponse(BaseModel):
+    system_prompt: str = Field(
+        ..., description="The fully rendered system prompt that will be sent"
+    )
+    sample_input: str = Field(
+        ...,
+        description=(
+            "The sample/placeholder content, sent as a separate user message "
+            "(source content is never interpolated into the system prompt)"
+        ),
+    )
+
+
+class TransformationCostEstimateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    transformation_id: str = Field(..., description="ID of the transformation")
+    input_text: str = Field(
+        ..., description="The text that would be sent (used for the token estimate)"
+    )
+    model_id: Optional[str] = Field(
+        None, description="Model override; falls back to the transformation/system default"
+    )
+
+
+class TransformationCostEstimateResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_id: Optional[str] = Field(None, description="Effective model that would be used")
+    provider: Optional[str] = Field(None, description="Provider of the effective model")
+    model_name: Optional[str] = Field(None, description="Name of the effective model")
+    cost_status: Literal["known", "free", "unknown"] = Field(
+        ..., description="Whether the estimate below is known, free, or unknown"
+    )
+    estimated_cost_usd: Optional[float] = Field(
+        None, description="Best-effort estimated cost in USD; None when unknown"
+    )
+    estimated_input_tokens: int = Field(
+        ..., description="Token estimate for the instructions + input text"
+    )
+    estimated_output_tokens: int = Field(
+        ..., description="Rough output token estimate (actual usage is unknown ahead of time)"
+    )
+    is_estimate: bool = Field(
+        True, description="Always true - real cost is only known after execution"
+    )
+
+
+class TransformationResultVersionResponse(BaseModel):
+    version: int
+    content: str
+    created: Optional[str] = None
+    is_latest: bool = False
+
+
+class TransformationResultHistoryResponse(BaseModel):
+    transformation_id: str
+    source_id: str
+    versions: List[TransformationResultVersionResponse]
 
 
 # Default Prompt API models
@@ -342,6 +476,13 @@ class SourceCreate(BaseModel):
     async_processing: bool = Field(
         False, description="Whether to process source asynchronously"
     )
+    # Duplicate-detection override: the duplicate pre-check (text/upload
+    # sources only - see api/routers/sources.py) returns 409 on a
+    # content_hash match unless this is set, letting the client resubmit
+    # the exact same request after the user confirms "add anyway".
+    force_duplicate: bool = Field(
+        False, description="Create even if an identical source already exists"
+    )
 
     @model_validator(mode="after")
     def validate_notebook_fields(self):
@@ -385,6 +526,13 @@ class SourceResponse(BaseModel):
     processing_info: Optional[Dict] = None
     # Notebook associations
     notebooks: Optional[List[str]] = None
+    # Archive flag (mirrors Notebook.archived) - see migration 30
+    archived: bool = False
+    # Set when another source in one of this source's notebooks shares the
+    # same content_hash. A UX hint, not a hard block - see
+    # open_notebook/graphs/source.py save_source().
+    duplicate_of: Optional[str] = None
+    duplicate_of_title: Optional[str] = None
 
 
 class SourceListResponse(BaseModel):
@@ -402,6 +550,42 @@ class SourceListResponse(BaseModel):
     command_id: Optional[str] = None
     status: Optional[str] = None
     processing_info: Optional[Dict[str, Any]] = None
+    archived: bool = False
+    duplicate_of: Optional[str] = None
+
+
+class SourceDeletePreview(BaseModel):
+    """Explicit delete-impact summary - see Source.get_delete_preview()."""
+
+    source_id: str
+    chunk_count: int = Field(..., description="Embedded chunks that will be removed")
+    insight_count: int = Field(..., description="Insights that will be removed")
+    chat_session_count: int = Field(
+        ...,
+        description=(
+            "Source-scoped chat sessions that reference this source directly "
+            "and will be removed with it. Does not count inline citations "
+            "inside notebook-wide chat answers - those have no foreign key "
+            "anywhere in the schema."
+        ),
+    )
+    notebook_count: int = Field(
+        ..., description="Notebooks this source is linked to (unlinked, not deleted)"
+    )
+
+
+class SourceUploadLimits(BaseModel):
+    """Single source of truth for upload limits the UI should display.
+
+    Mirrors the real enforced limit (api/middleware.py MaxBodySizeMiddleware)
+    instead of a hardcoded guess that could drift from it. There is no fixed
+    file-type allowlist to report: content-core content-sniffs uploads
+    (50+ formats) rather than relying on a hand-maintained extension list -
+    see tests/test_upload_type_mitigations.py for why that's intentional.
+    """
+
+    max_upload_size_bytes: int
+    max_upload_size_mb: float
 
 
 # Insights API models
@@ -1013,6 +1197,65 @@ class GradeFlashcardResponse(BaseModel):
     )
     item: Dict[str, Any] = Field(..., description="The flashcard item with updated SRS state")
     due_count: int = Field(..., description="Remaining flashcards due in this set after this review")
+
+
+class SuspendFlashcardRequest(BaseModel):
+    """Body for POST /study/{study_set_id}/items/{item_index}/suspend.
+
+    Pauses (or resumes) spaced-repetition scheduling for one card without
+    deleting it - see open_notebook/study/models.py::StudySet.set_item_suspended.
+    """
+
+    suspended: bool = Field(
+        ..., description="True to suspend (exclude from due/review), False to resume"
+    )
+
+
+class SuspendFlashcardResponse(BaseModel):
+    study_set_id: str
+    item_index: int
+    item: Dict[str, Any] = Field(..., description="The flashcard item with updated suspended flag")
+    due_count: int = Field(..., description="Remaining flashcards due in this set after this change")
+
+
+class WeakSourceStat(BaseModel):
+    """One entry in StudyMetricsResponse.weak_sources.
+
+    "Topic" here means the source (by its generation-time `source_title`
+    citation, see Flashcard.source_title) a card came from - there is no
+    separate topic/tag taxonomy on study content to hang a richer concept
+    on, so this is the honest, smallest version: which source's cards you
+    are recalling the least.
+    """
+
+    source_title: str
+    accuracy_pct: int = Field(..., description="Share of reviewed cards from this source rated good/easy")
+    reviewed_count: int = Field(..., description="Number of reviewed cards from this source")
+
+
+class StudyMetricsResponse(BaseModel):
+    """Response for GET /study/metrics.
+
+    Deliberately simple and honest: no invented score, streak, or XP -
+    every field here is either a direct count or a plain percentage
+    computed from recorded review outcomes.
+    """
+
+    due_today: int = Field(..., description="Flashcards due for review right now (excludes suspended cards)")
+    accuracy_pct: Optional[int] = Field(
+        None,
+        description=(
+            "Share of reviewed flashcards whose most recent rating was "
+            "good/easy. Null if nothing has been reviewed yet - never shown "
+            "as a fabricated 0%."
+        ),
+    )
+    reviewed_cards: int = Field(..., description="Flashcards with at least one recorded review")
+    total_cards: int = Field(..., description="Total flashcards across the scoped study sets")
+    weak_sources: List[WeakSourceStat] = Field(
+        default_factory=list,
+        description="Up to 5 sources with the lowest recall accuracy (min 2 reviewed cards each)",
+    )
 
 
 # Google Drive integration API models

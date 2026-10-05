@@ -12,11 +12,12 @@ Behavior notes:
   them to the same status codes and messages as before.
 """
 
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from api.models import Citation
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import ChatSession, Source
 
@@ -27,6 +28,17 @@ class ChatMessage(BaseModel):
     type: str = Field(..., description="Message type (human|ai)")
     content: str = Field(..., description="Message content")
     timestamp: Optional[str] = Field(None, description="Message timestamp")
+    citations: Optional[List[Citation]] = Field(
+        None,
+        description=(
+            "Structured citations backing this message's [n] markers, read "
+            "from the persisted message's additional_kwargs. None for human "
+            "messages or AI messages that cited nothing."
+        ),
+    )
+    feedback: Optional[Literal["up", "down"]] = Field(
+        None, description="This message's stored thumbs up/down rating, if any"
+    )
 
 
 class SuccessResponse(BaseModel):
@@ -79,16 +91,110 @@ async def get_verified_source_session(
     return full_source_id, source, full_session_id, session
 
 
-def extract_chat_messages(raw_messages: Iterable[Any]) -> List[ChatMessage]:
-    """Convert LangGraph/LangChain state messages into `ChatMessage` models."""
+def extract_chat_messages(
+    raw_messages: Iterable[Any],
+    feedback_map: Optional[Dict[str, str]] = None,
+) -> List[ChatMessage]:
+    """Convert LangGraph/LangChain state messages into `ChatMessage` models.
+
+    Citations are read from each message's `additional_kwargs["citations"]`
+    (stashed there by the chat/source_chat graphs when the AI message is
+    built) - this is how citations survive a checkpoint reload, since
+    LangGraph persists the whole message object including
+    `additional_kwargs`. `feedback_map` (message id -> "up"/"down") comes
+    from the separate `chat_feedback` table; pass it in when available so a
+    reopened conversation still shows the stored rating.
+    """
+    feedback_map = feedback_map or {}
     messages: List[ChatMessage] = []
     for msg in raw_messages:
+        message_id = getattr(msg, "id", f"msg_{len(messages)}")
+        additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+        raw_citations = (
+            additional_kwargs.get("citations")
+            if isinstance(additional_kwargs, dict)
+            else None
+        )
+        citations = None
+        if raw_citations:
+            try:
+                citations = [Citation(**c) for c in raw_citations]
+            except Exception:
+                # A malformed/legacy payload shouldn't break message loading.
+                citations = None
         messages.append(
             ChatMessage(
-                id=getattr(msg, "id", f"msg_{len(messages)}"),
+                id=message_id,
                 type=msg.type if hasattr(msg, "type") else "unknown",
                 content=msg.content if hasattr(msg, "content") else str(msg),
                 timestamp=None,  # LangChain messages don't have timestamps by default
+                citations=citations,
+                feedback=feedback_map.get(str(message_id)),
             )
         )
     return messages
+
+
+class FeedbackRequest(BaseModel):
+    rating: Optional[Literal["up", "down"]] = Field(
+        None,
+        description="Thumbs up/down rating for this message, or null to clear it",
+    )
+
+
+async def get_feedback_map(session_id: str) -> Dict[str, str]:
+    """Fetch this session's stored message ratings as {message_id: rating}.
+
+    Defensive about unexpected row shapes (e.g. a differently-shaped mock in
+    tests, or a future schema tweak): rows missing the expected fields are
+    skipped rather than raising.
+    """
+    try:
+        rows = await repo_query(
+            "SELECT message_id, rating FROM chat_feedback WHERE session_id = $session_id",
+            {"session_id": session_id},
+        )
+    except Exception:
+        return {}
+
+    feedback_map: Dict[str, str] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        message_id = row.get("message_id")
+        rating = row.get("rating")
+        if message_id and rating in ("up", "down"):
+            feedback_map[str(message_id)] = rating
+    return feedback_map
+
+
+async def set_feedback(
+    session_id: str, message_id: str, rating: Optional[str]
+) -> None:
+    """Upsert (or clear) a message's thumbs up/down rating.
+
+    Keyed by a deterministic record id derived from session+message so a
+    repeated rating on the same message updates the same row instead of
+    accumulating duplicates.
+    """
+    record_key = f"{session_id}:{message_id}".replace(":", "_")
+    if rating is None:
+        await repo_query(
+            "DELETE chat_feedback WHERE session_id = $session_id AND message_id = $message_id",
+            {"session_id": session_id, "message_id": message_id},
+        )
+        return
+
+    await repo_query(
+        """
+        UPSERT type::thing('chat_feedback', $record_key)
+        SET session_id = $session_id, message_id = $message_id, rating = $rating,
+            updated = time::now()
+        """,
+        {
+            "record_key": record_key,
+            "session_id": session_id,
+            "message_id": message_id,
+            "rating": rating,
+        },
+    )

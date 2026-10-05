@@ -173,6 +173,11 @@ export function GuidedFlashcardSession({
       <Card className="w-full max-w-xl">
         <CardContent className="space-y-4 p-6">
           <p className="text-center text-lg font-medium text-foreground">{card.front}</p>
+          {card.source_title ? (
+            <p className="text-center text-xs text-muted-foreground">
+              {t('study.sourceLabel')}: {card.source_title}
+            </p>
+          ) : null}
 
           {!showResult ? (
             <div className="space-y-3">

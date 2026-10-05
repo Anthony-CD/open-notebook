@@ -1,15 +1,16 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react'
+import { ChevronLeft, ChevronRight, PauseCircle, PlayCircle, RotateCcw } from 'lucide-react'
 
 import { FlashcardItem, SrsRating } from '@/lib/types/study'
 import { useTranslation } from '@/lib/hooks/use-translation'
-import { useReviewFlashcard } from '@/lib/hooks/use-study'
+import { useReviewFlashcard, useSuspendFlashcard } from '@/lib/hooks/use-study'
 import { buildQueue, isDue, todayIso } from '@/lib/utils/flashcard-queue'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 interface FlashcardViewerProps {
   items: FlashcardItem[]
@@ -38,26 +39,57 @@ export function FlashcardViewer({ items, studySetId, notebookId }: FlashcardView
   const { t } = useTranslation()
   const [position, setPosition] = useState(0)
   const [flipped, setFlipped] = useState(false)
+  const [sourceFilter, setSourceFilter] = useState<string>('all')
   const reviewFlashcard = useReviewFlashcard(studySetId, notebookId)
+  const suspendFlashcard = useSuspendFlashcard(studySetId, notebookId)
 
-  // Built once per study set (not on every `items` update, which would
-  // reshuffle the deck under the user mid-session as reviews change due
-  // dates - see useReviewFlashcard's optimistic cache patch).
+  // Distinct source_title citations across the set, for the "filter by
+  // source" dropdown - hidden entirely when no card carries one (older
+  // study sets generated before this field existed, or source content that
+  // wasn't labeled into `## Source: <title>` sections).
+  const sourceTitles = useMemo(() => {
+    const set = new Set<string>()
+    items.forEach((item) => {
+      if (item.source_title) set.add(item.source_title)
+    })
+    return Array.from(set).sort()
+  }, [items])
+
+  const filteredItems = useMemo(() => {
+    if (sourceFilter === 'all') return items
+    return items.filter((item) => item.source_title === sourceFilter)
+  }, [items, sourceFilter])
+
+  // Built once per study set/filter (not on every `items` update, which
+  // would reshuffle the deck under the user mid-session as reviews change
+  // due dates - see useReviewFlashcard's optimistic cache patch).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const queue = useMemo(() => buildQueue(items), [studySetId])
+  const queue = useMemo(() => buildQueue(filteredItems), [studySetId, sourceFilter])
 
   const dueCount = useMemo(() => {
     const today = todayIso()
-    return items.filter((item) => isDue(item, today)).length
-  }, [items])
+    return filteredItems.filter((item) => isDue(item, today)).length
+  }, [filteredItems])
 
   if (items.length === 0) {
     return null
   }
 
+  if (filteredItems.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+        {t('study.sourceFilterEmpty')}
+      </div>
+    )
+  }
+
   const clampedPosition = Math.min(position, queue.length - 1)
-  const originalIndex = queue[clampedPosition]
-  const card = items[originalIndex]
+  const originalFilteredIndex = queue[clampedPosition]
+  const card = filteredItems[originalFilteredIndex]
+  // Index back into the full `items` array (not `filteredItems`) - the
+  // review/suspend mutations address cards by their position in the study
+  // set as stored, which the source filter never changes.
+  const originalIndex = items.indexOf(card)
   const cardDue = isDue(card, todayIso())
 
   const goTo = (nextPosition: number) => {
@@ -74,13 +106,44 @@ export function FlashcardViewer({ items, studySetId, notebookId }: FlashcardView
     }
   }
 
+  const handleToggleSuspend = () => {
+    suspendFlashcard.mutate({ itemIndex: originalIndex, suspended: !card.suspended })
+  }
+
   return (
-    <div className="flex flex-col items-center gap-4">
+    <div className="flex w-full max-w-xl flex-col items-center gap-4">
+      {sourceTitles.length > 0 ? (
+        <Select
+          value={sourceFilter}
+          onValueChange={(value) => {
+            setSourceFilter(value)
+            setPosition(0)
+            setFlipped(false)
+          }}
+        >
+          <SelectTrigger className="w-full max-w-xs" aria-label={t('study.sourceFilterLabel')}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t('study.sourceFilterAll')}</SelectItem>
+            {sourceTitles.map((title) => (
+              <SelectItem key={title} value={title}>
+                {title}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : null}
+
       <div className="flex flex-wrap items-center justify-center gap-2">
         <p className="text-sm text-muted-foreground">
           {t('study.cardProgress', { current: clampedPosition + 1, total: queue.length })}
         </p>
-        {dueCount > 0 ? (
+        {card.suspended ? (
+          <Badge variant="outline" className="border-muted-foreground/40 text-muted-foreground">
+            {t('study.suspendedBadge')}
+          </Badge>
+        ) : dueCount > 0 ? (
           <Badge variant="outline" className="border-teal/40 text-teal">
             {t('study.dueCount', { count: dueCount })}
           </Badge>
@@ -120,7 +183,13 @@ export function FlashcardViewer({ items, studySetId, notebookId }: FlashcardView
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      {card.source_title ? (
+        <p className="text-xs text-muted-foreground">
+          {t('study.sourceLabel')}: {card.source_title}
+        </p>
+      ) : null}
+
+      <div className="flex flex-wrap items-center justify-center gap-2">
         <Button
           variant="outline"
           size="sm"
@@ -143,7 +212,28 @@ export function FlashcardViewer({ items, studySetId, notebookId }: FlashcardView
           {t('common.next')}
           <ChevronRight className="h-4 w-4" />
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleToggleSuspend}
+          disabled={suspendFlashcard.isPending}
+        >
+          {card.suspended ? (
+            <>
+              <PlayCircle className="h-4 w-4" />
+              {t('study.resumeCard')}
+            </>
+          ) : (
+            <>
+              <PauseCircle className="h-4 w-4" />
+              {t('study.suspendCard')}
+            </>
+          )}
+        </Button>
       </div>
+      {card.suspended ? (
+        <p className="text-xs text-muted-foreground">{t('study.suspendedHint')}</p>
+      ) : null}
 
       {flipped ? (
         <div className="flex flex-col items-center gap-2">

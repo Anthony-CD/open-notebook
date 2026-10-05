@@ -15,8 +15,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { StudySetCard } from '@/components/study/StudySetCard'
 import { GenerateStudySetDialog } from '@/components/study/GenerateStudySetDialog'
+import { StudyMetricsSummary } from '@/components/study/StudyMetricsSummary'
 
 interface FlatStudySet {
   studySet: StudySetListItem
@@ -27,6 +29,7 @@ export default function StudyPage() {
   const { t } = useTranslation()
   const [showGenerateDialog, setShowGenerateDialog] = useState(false)
   const [filter, setFilter] = useState<'all' | StudyKind | 'due'>('all')
+  const [notebookFilter, setNotebookFilter] = useState<string>('all')
 
   const notebooksQuery = useNotebooks()
   const notebooks = useMemo(() => notebooksQuery.data ?? [], [notebooksQuery.data])
@@ -66,10 +69,14 @@ export default function StudyPage() {
   )
 
   const filteredStudySets = useMemo(() => {
-    if (filter === 'all') return allStudySets
-    if (filter === 'due') return allStudySets.filter((s) => (s.studySet.due_count ?? 0) > 0)
-    return allStudySets.filter((s) => s.studySet.kind === filter)
-  }, [allStudySets, filter])
+    let result = allStudySets
+    if (notebookFilter !== 'all') {
+      result = result.filter((s) => s.studySet.notebook === notebookFilter)
+    }
+    if (filter === 'due') return result.filter((s) => (s.studySet.due_count ?? 0) > 0)
+    if (filter !== 'all') return result.filter((s) => s.studySet.kind === filter)
+    return result
+  }, [allStudySets, filter, notebookFilter])
 
   const handleRefresh = () => {
     notebooksQuery.refetch()
@@ -100,28 +107,47 @@ export default function StudyPage() {
             </div>
           </header>
 
+          <StudyMetricsSummary notebookId={notebookFilter !== 'all' ? notebookFilter : undefined} />
+
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <Tabs
-              value={filter}
-              onValueChange={(value) => setFilter(value as 'all' | StudyKind | 'due')}
-            >
-              <TabsList>
-                <TabsTrigger value="all">{t('study.filterAll')}</TabsTrigger>
-                <TabsTrigger value="due">
-                  {t('study.filterDue')}
-                  {totalDue > 0 ? (
-                    <Badge variant="outline" className="ml-1.5 border-teal/40 text-teal">
-                      {totalDue}
-                    </Badge>
-                  ) : null}
-                </TabsTrigger>
-                <TabsTrigger value="flashcards">{t('study.kindFlashcards')}</TabsTrigger>
-                <TabsTrigger value="quiz">{t('study.kindQuiz')}</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <div className="flex flex-wrap items-center gap-3">
+              <Tabs
+                value={filter}
+                onValueChange={(value) => setFilter(value as 'all' | StudyKind | 'due')}
+              >
+                <TabsList>
+                  <TabsTrigger value="all">{t('study.filterAll')}</TabsTrigger>
+                  <TabsTrigger value="due">
+                    {t('study.filterDue')}
+                    {totalDue > 0 ? (
+                      <Badge variant="outline" className="ml-1.5 border-teal/40 text-teal">
+                        {totalDue}
+                      </Badge>
+                    ) : null}
+                  </TabsTrigger>
+                  <TabsTrigger value="flashcards">{t('study.kindFlashcards')}</TabsTrigger>
+                  <TabsTrigger value="quiz">{t('study.kindQuiz')}</TabsTrigger>
+                </TabsList>
+              </Tabs>
+              {notebooks.length > 0 ? (
+                <Select value={notebookFilter} onValueChange={setNotebookFilter}>
+                  <SelectTrigger className="w-[200px]" aria-label={t('study.notebookFilterLabel')}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">{t('study.notebookFilterAll')}</SelectItem>
+                    {notebooks.map((notebook) => (
+                      <SelectItem key={notebook.id} value={notebook.id}>
+                        {notebook.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
+            </div>
             <Badge variant="outline" className="font-medium">
               <span className="text-muted-foreground mr-1.5">{t('study.total')}</span>
-              <span className="font-mono text-foreground">{allStudySets.length}</span>
+              <span className="font-mono text-foreground">{filteredStudySets.length}</span>
             </Badge>
           </div>
 

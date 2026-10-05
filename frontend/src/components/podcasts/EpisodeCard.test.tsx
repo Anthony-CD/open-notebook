@@ -1,8 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 
 import { EpisodeCard } from './EpisodeCard'
-import apiClient from '@/lib/api/client'
 import type { PodcastEpisode } from '@/lib/types/podcasts'
 
 // useTranslation is mocked globally in setup.ts (t returns the key string)
@@ -13,6 +12,14 @@ vi.mock('@/lib/api/client', () => ({
 
 vi.mock('@/lib/api/podcasts', () => ({
   resolvePodcastAssetUrl: vi.fn(async () => undefined),
+}))
+
+// EpisodeCard also drives cancel/organization mutations via these hooks -
+// mock them (same pattern as CostMeterWidget.test.tsx) instead of wrapping
+// every render in a real QueryClientProvider.
+vi.mock('@/lib/hooks/use-podcasts', () => ({
+  useCancelPodcastJob: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useUpdateEpisodeOrganization: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
 }))
 
 function makeEpisode(overrides: Partial<PodcastEpisode> = {}): PodcastEpisode {
@@ -137,20 +144,14 @@ describe('EpisodeCard model details', () => {
   })
 })
 
-describe('EpisodeCard audio loading', () => {
-  // Regression test for a live production bug: apiClient's request
-  // interceptor prepends its own "/api" baseURL to any request path that
-  // isn't a network-absolute URL (scheme+host). episode.audio_url already
-  // starts with "/api/..." (PodcastEpisodeResponse), so passing it to
-  // apiClient.get() unmodified double-prefixed the request to
-  // "/api/api/podcasts/.../audio" - a 404 in relative-path/tunnel deploys
-  // where getApiUrl() resolves to "" (confirmed live: the network request
-  // Chrome actually sent was exactly that double-prefixed 404 URL). Fixed
-  // by stripping the redundant leading "/api" before calling apiClient,
-  // matching every other apiClient call in this codebase.
-  it('strips the redundant leading /api before calling apiClient for the audio blob', async () => {
-    vi.mocked(apiClient.get).mockResolvedValue({ data: new Blob(['audio']) })
-
+describe('EpisodeCard audio wiring', () => {
+  // The actual load/play/download/fetch behavior (including the
+  // apiClient /api double-prefix regression and the "don't re-fetch
+  // already-loaded audio" guard) now lives in PodcastAudioPlayer and is
+  // covered directly in PodcastAudioPlayer.test.tsx. EpisodeCard's own job
+  // is just to mount that component - inline in the card, and again inside
+  // the details dialog - whenever the episode has audio.
+  it('renders a PodcastAudioPlayer (inline) when the episode has a protected audio_url', () => {
     render(
       <EpisodeCard
         episode={makeEpisode({ audio_url: '/api/podcasts/episodes/episode:1/audio' })}
@@ -158,40 +159,29 @@ describe('EpisodeCard audio loading', () => {
       />
     )
 
-    await waitFor(() => {
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/podcasts/episodes/episode:1/audio',
-        { responseType: 'blob' }
-      )
-    })
+    expect(screen.getByRole('button', { name: 'podcasts.loadAudioToPlay' })).toBeInTheDocument()
   })
 
-  it('lets the user download the already-loaded audio without a second network request', async () => {
-    vi.mocked(apiClient.get).mockResolvedValue({ data: new Blob(['audio']) })
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-
-    render(
-      <EpisodeCard
-        episode={makeEpisode({
-          name: 'Beating the Street: Chapter 1',
-          audio_url: '/api/podcasts/episodes/episode:1/audio',
-        })}
-        onDelete={vi.fn()}
-      />
+  it('renders a second, independent PodcastAudioPlayer inside the details dialog', () => {
+    renderAndOpenDetails(
+      makeEpisode({ audio_url: '/api/podcasts/episodes/episode:1/audio' })
     )
 
-    const downloadButtons = await screen.findAllByTitle('common.download')
-    const getCalls = vi.mocked(apiClient.get).mock.calls.length
+    // Radix's open Dialog marks the rest of the page aria-hidden (focus
+    // trap), so the inline card player is still mounted but no longer
+    // query-visible by role from outside - scope to the dialog itself to
+    // confirm it got its own PodcastAudioPlayer instance.
+    const dialog = screen.getByRole('dialog')
+    expect(
+      within(dialog).getByRole('button', { name: 'podcasts.loadAudioToPlay' })
+    ).toBeInTheDocument()
+  })
 
-    fireEvent.click(downloadButtons[0])
+  it('renders no audio player when the episode has neither audio_file nor audio_url', () => {
+    render(<EpisodeCard episode={makeEpisode()} onDelete={vi.fn()} />)
 
-    // Reuses the blob URL already fetched for playback - no extra apiClient call.
-    expect(apiClient.get).toHaveBeenCalledTimes(getCalls)
-    expect(clickSpy).toHaveBeenCalledTimes(1)
-    const anchor = clickSpy.mock.instances[0] as unknown as HTMLAnchorElement
-    expect(anchor.download).toBe('Beating_the_Street_Chapter_1.mp3')
-    expect(anchor.href).toMatch(/^blob:/)
-
-    clickSpy.mockRestore()
+    expect(
+      screen.queryByRole('button', { name: 'podcasts.loadAudioToPlay' })
+    ).not.toBeInTheDocument()
   })
 })

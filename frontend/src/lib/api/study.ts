@@ -4,10 +4,12 @@ import {
   GradeFlashcardResponse,
   ReviewFlashcardResponse,
   SrsRating,
+  StudyMetrics,
   StudySet,
   StudySetGenerationResponse,
   StudySetListItem,
   StudyJobStatusResponse,
+  SuspendFlashcardResponse,
 } from '@/lib/types/study'
 
 export const studyApi = {
@@ -58,6 +60,21 @@ export const studyApi = {
       `/study/${studySetId}/items/${itemIndex}/grade`,
       { answer, attempt }
     )
+    return response.data
+  },
+
+  suspendFlashcard: async (studySetId: string, itemIndex: number, suspended: boolean) => {
+    const response = await apiClient.post<SuspendFlashcardResponse>(
+      `/study/${studySetId}/items/${itemIndex}/suspend`,
+      { suspended }
+    )
+    return response.data
+  },
+
+  getMetrics: async (notebookId?: string) => {
+    const response = await apiClient.get<StudyMetrics>('/study/metrics', {
+      params: notebookId ? { notebook_id: notebookId } : undefined,
+    })
     return response.data
   },
 }

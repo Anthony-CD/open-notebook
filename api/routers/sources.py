@@ -20,16 +20,19 @@ from surreal_commands import execute_command_sync, submit_command
 
 from api.command_service import CommandService
 from api.credentials_service import validate_url
+from api.middleware import get_max_upload_size_bytes
 from api.models import (
     AssetModel,
     CreateSourceInsightRequest,
     InsightCreationResponse,
     SourceCreate,
+    SourceDeletePreview,
     SourceInsightResponse,
     SourceListResponse,
     SourceResponse,
     SourceStatusResponse,
     SourceUpdate,
+    SourceUploadLimits,
 )
 from commands.source_commands import SourceProcessingInput
 from open_notebook.config import UPLOADS_FOLDER
@@ -42,6 +45,7 @@ from open_notebook.exceptions import (
     OpenNotebookError,
     UnsupportedTypeException,
 )
+from open_notebook.utils.content_hash import compute_content_hash
 from open_notebook.utils.job_status import (
     ACTIVE_JOB_STATUSES,
     normalize_job_status,
@@ -143,6 +147,16 @@ async def _stamp_source_view(source_id: str) -> None:
         logger.warning(f"Failed to stamp last_viewed_at for source {source_id}: {e}")
 
 
+async def _get_source_notebook_ids(source_id: str) -> List[str]:
+    """Notebooks this source is linked to. `reference` is a graph edge
+    (RELATE source->reference->notebook), so it only has `in`/`out` columns."""
+    references = await repo_query(
+        "SELECT VALUE out FROM reference WHERE in = $source_id",
+        {"source_id": ensure_record_id(source_id)},
+    )
+    return [str(nb_id) for nb_id in references] if references else []
+
+
 def generate_unique_filename(original_filename: str, upload_folder: str) -> str:
     """Generate unique filename like Streamlit app (append counter if file exists),
     atomically reserving it so two concurrent uploads that land on the same
@@ -185,16 +199,21 @@ def generate_unique_filename(original_filename: str, upload_folder: str) -> str:
             counter += 1
 
 
-def _write_uploaded_file(filename: str, content: bytes) -> str:
+def _write_uploaded_file(filename: str, content: bytes) -> tuple[str, str]:
     """Sync filesystem work for save_uploaded_file() - run via asyncio.to_thread
-    so a large upload doesn't block the event loop for other requests."""
+    so a large upload doesn't block the event loop for other requests.
+
+    Returns (file_path, content_hash). The hash is computed from the same
+    bytes written to disk, before anything else can touch them, so the
+    duplicate pre-check in create_source() always hashes the actual upload.
+    """
     file_path = generate_unique_filename(filename, UPLOADS_FOLDER)
     try:
         with open(file_path, "wb") as f:
             f.write(content)
 
         logger.info(f"Saved uploaded file to: {file_path}")
-        return file_path
+        return file_path, compute_content_hash(content)
     except Exception as e:
         logger.error(f"Failed to save uploaded file: {e}")
         # Clean up partial file if it exists
@@ -203,8 +222,8 @@ def _write_uploaded_file(filename: str, content: bytes) -> str:
         raise
 
 
-async def save_uploaded_file(upload_file: UploadFile) -> str:
-    """Save uploaded file to uploads folder and return file path."""
+async def save_uploaded_file(upload_file: UploadFile) -> tuple[str, str]:
+    """Save uploaded file to uploads folder; return (file_path, content_hash)."""
     if not upload_file.filename:
         raise ValueError("No filename provided")
 
@@ -223,6 +242,7 @@ def parse_source_form_data(
     embed: str = Form("false"),  # Accept as string, convert to bool
     delete_source: str = Form("false"),  # Accept as string, convert to bool
     async_processing: str = Form("false"),  # Accept as string, convert to bool
+    force_duplicate: str = Form("false"),  # Accept as string, convert to bool
     file: Optional[UploadFile] = File(None),
 ) -> tuple[SourceCreate, Optional[UploadFile]]:
     """Parse form data into SourceCreate model and return upload file separately."""
@@ -235,6 +255,7 @@ def parse_source_form_data(
     embed_bool = str_to_bool(embed)
     delete_source_bool = str_to_bool(delete_source)
     async_processing_bool = str_to_bool(async_processing)
+    force_duplicate_bool = str_to_bool(force_duplicate)
 
     # Parse JSON strings
     notebooks_list = None
@@ -271,6 +292,7 @@ def parse_source_form_data(
             embed=embed_bool,
             delete_source=delete_source_bool,
             async_processing=async_processing_bool,
+            force_duplicate=force_duplicate_bool,
         )
     except ValidationError as e:
         errors = "; ".join(err.get("msg", "invalid value") for err in e.errors())
@@ -295,6 +317,10 @@ async def get_sources(
         description="Field to sort by (type, title, created, updated, insights_count, or embedded)",
     ),
     sort_order: str = Query("desc", description="Sort order (asc or desc)"),
+    archived: Optional[bool] = Query(
+        None,
+        description="Filter by archived status (omit to return both archived and active)",
+    ),
 ):
     """Get sources with pagination and sorting support."""
     try:
@@ -331,14 +357,23 @@ async def get_sources(
         else:
             from_clause = "source"
 
+        # Default behavior unchanged (no filter = both archived and active),
+        # opt-in like Notebook's own archived filter (api/routers/notebooks.py).
+        where_clause = ""
+        if archived is not None:
+            where_clause = "WHERE (archived OR false) = $archived"
+            params["archived"] = archived
+
         # Query sources - include command field with FETCH
         query = f"""
             SELECT id, asset, created, title, updated, topics, command,
+            archived, duplicate_of,
             string::lowercase(title OR '') AS title_sort,
             ({SOURCE_TYPE_EXPRESSION}) AS type,
             (SELECT VALUE count() FROM source_insight WHERE source = $parent.id GROUP ALL)[0].count OR 0 AS insights_count,
             (SELECT VALUE id FROM source_embedding WHERE source = $parent.id LIMIT 1) != [] AS embedded
             FROM {from_clause}
+            {where_clause}
             {order_clause}
             LIMIT $limit START $offset
             FETCH command
@@ -397,6 +432,10 @@ async def get_sources(
                     command_id=command_id,
                     status=status,
                     processing_info=processing_info,
+                    archived=bool(row.get("archived")),
+                    duplicate_of=str(row["duplicate_of"])
+                    if row.get("duplicate_of")
+                    else None,
                 )
             )
 
@@ -408,6 +447,26 @@ async def get_sources(
     except Exception as e:
         logger.error(f"Error fetching sources: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching sources")
+
+
+# NOTE: must be registered before GET /sources/{source_id} below - both are
+# one path segment past /sources, and FastAPI/Starlette matches routes in
+# registration order, so a literal "/sources/limits" registered after the
+# {source_id} route would be swallowed by it (source_id="limits").
+@router.get("/sources/limits", response_model=SourceUploadLimits)
+async def get_source_upload_limits():
+    """Real, currently-enforced upload limits for the UI to display.
+
+    Single source of truth with api/middleware.py's MaxBodySizeMiddleware -
+    the UI's helper text should never hardcode a guess that can drift from
+    what the server actually enforces. There is no fixed file-type
+    allowlist to report (see SourceUploadLimits docstring).
+    """
+    max_bytes = get_max_upload_size_bytes()
+    return SourceUploadLimits(
+        max_upload_size_bytes=max_bytes,
+        max_upload_size_mb=round(max_bytes / (1024 * 1024), 2),
+    )
 
 
 def _source_to_response(
@@ -434,6 +493,8 @@ def _source_to_response(
         "embedded_chunks": embedded_chunks,
         "created": str(source.created),
         "updated": str(source.updated),
+        "archived": bool(source.archived),
+        "duplicate_of": str(source.duplicate_of) if source.duplicate_of else None,
     }
     fields.update(extras)
     return SourceResponse(**fields)
@@ -503,6 +564,55 @@ async def _build_content_state(
         )
 
     return content_state
+
+
+async def _check_duplicate_before_create(
+    source_data: SourceCreate, upload_hash: Optional[str]
+) -> None:
+    """Pre-flight duplicate warning for source types whose content is known
+    before the async pipeline runs (text, upload).
+
+    Link sources can't be checked here - their content only exists after
+    content-core extracts it - so duplicate detection for links happens
+    post-hoc in the source_graph (open_notebook/graphs/source.py
+    save_source()) and surfaces via `duplicate_of` on GET instead of
+    blocking creation.
+
+    Raises HTTP 409 with structured detail when a duplicate is found and
+    the caller hasn't set force_duplicate (the client resubmits the same
+    request with force_duplicate=true after the user confirms).
+    """
+    if source_data.force_duplicate:
+        return
+    if not source_data.notebooks:
+        # Nothing to compare against - a source with no notebook yet can't
+        # collide with anything scoped to a notebook.
+        return
+
+    content_hash: Optional[str] = None
+    if source_data.type == "text" and source_data.content:
+        content_hash = compute_content_hash(source_data.content)
+    elif source_data.type == "upload" and upload_hash:
+        content_hash = upload_hash
+
+    if not content_hash:
+        return
+
+    duplicate = await Source.find_duplicate(content_hash, source_data.notebooks)
+    if duplicate:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "A source with identical content already exists in "
+                    "this notebook."
+                ),
+                "duplicate": True,
+                "existing_source_id": duplicate.id,
+                "existing_source_title": duplicate.title,
+                "existing_source_created": str(duplicate.created),
+            },
+        )
 
 
 async def _create_source_async_path(
@@ -676,6 +786,7 @@ async def create_source(
 
     # Initialize file_path before try block so exception handlers can reference it
     file_path = None
+    upload_hash: Optional[str] = None
 
     try:
         # Verify all specified notebooks exist (backward compatibility support)
@@ -689,13 +800,18 @@ async def create_source(
         # Handle file upload if provided
         if upload_file and source_data.type == "upload":
             try:
-                file_path = await save_uploaded_file(upload_file)
+                file_path, upload_hash = await save_uploaded_file(upload_file)
             except Exception as e:
                 logger.error(f"File upload failed: {e}")
                 raise HTTPException(status_code=400, detail="File upload failed")
 
         # Prepare content_state for processing (type validation + SSRF/LFI guards)
         content_state = await _build_content_state(source_data, file_path)
+
+        # Duplicate pre-check (text/upload only - their content is known
+        # before the async pipeline runs; link sources are checked post-hoc,
+        # see open_notebook/graphs/source.py save_source()).
+        await _check_duplicate_before_create(source_data, upload_hash)
 
         # Validate transformations exist
         transformation_ids = source_data.transformations or []
@@ -813,6 +929,18 @@ async def get_source(source_id: str):
             [str(nb_id) for nb_id in notebooks_query] if notebooks_query else []
         )
 
+        # Resolve the duplicate's title for display (list view skips this -
+        # it would be an extra query per row - detail view is a single fetch).
+        duplicate_of_title = None
+        if source.duplicate_of:
+            try:
+                duplicate_source = await Source.get(str(source.duplicate_of))
+                duplicate_of_title = duplicate_source.title if duplicate_source else None
+            except Exception as e:
+                logger.warning(
+                    f"Failed to resolve duplicate_of title for source {source_id}: {e}"
+                )
+
         return _source_to_response(
             source,
             embedded_chunks=embedded_chunks,
@@ -823,6 +951,7 @@ async def get_source(source_id: str):
             processing_info=processing_info,
             # Notebook associations
             notebooks=notebook_ids,
+            duplicate_of_title=duplicate_of_title,
         )
     except HTTPException:
         raise
@@ -949,6 +1078,68 @@ async def update_source(source_id: str, source_update: SourceUpdate):
     except Exception as e:
         logger.error(f"Error updating source {source_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Error updating source")
+
+
+async def _set_archived(source_id: str, archived: bool) -> SourceResponse:
+    source = await Source.get(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    source.archived = archived
+    await source.save()
+
+    embedded_chunks = await source.get_embedded_chunks()
+    return _source_to_response(source, embedded_chunks=embedded_chunks)
+
+
+@router.post("/sources/{source_id}/archive", response_model=SourceResponse)
+async def archive_source(source_id: str):
+    """Archive a source: hides it from the default list view without
+    deleting it - its chunks/embeddings/insights/notebook links stay intact.
+    Mirrors Notebook archive/unarchive (api/routers/notebooks.py)."""
+    try:
+        return await _set_archived(source_id, True)
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error archiving source {source_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error archiving source")
+
+
+@router.post("/sources/{source_id}/unarchive", response_model=SourceResponse)
+async def unarchive_source(source_id: str):
+    """Restore an archived source to the default list view."""
+    try:
+        return await _set_archived(source_id, False)
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error unarchiving source {source_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error unarchiving source")
+
+
+@router.get("/sources/{source_id}/delete-preview", response_model=SourceDeletePreview)
+async def get_source_delete_preview(source_id: str):
+    """Explicit delete-impact summary, so the confirmation dialog can name
+    exactly what will be removed instead of a generic "are you sure?"."""
+    try:
+        source = await Source.get(source_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="Source not found")
+
+        preview = await source.get_delete_preview()
+        return SourceDeletePreview(source_id=source_id, **preview)
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting delete preview for source {source_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error getting delete preview")
 
 
 @router.post("/sources/{source_id}/retry", response_model=SourceResponse)
@@ -1088,6 +1279,126 @@ async def _retry_source_processing_locked(source_id: str):
     except Exception as e:
         logger.error(f"Error retrying source processing for {source_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Error retrying source processing")
+
+
+def parse_replace_form_data(
+    type: str = Form(...),
+    url: Optional[str] = Form(None),
+    content: Optional[str] = Form(None),
+    delete_source: str = Form("false"),
+    file: Optional[UploadFile] = File(None),
+) -> tuple[str, Optional[str], Optional[str], bool, Optional[UploadFile]]:
+    """Parse the multipart body for POST /sources/{id}/replace.
+
+    Deliberately a small subset of parse_source_form_data's fields - a
+    replace keeps the source's existing notebooks/transformations/embed
+    preference; only the content itself changes."""
+
+    def str_to_bool(value: str) -> bool:
+        return value.lower() in ("true", "1", "yes", "on")
+
+    if type not in ("link", "upload", "text"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid source type. Must be link, upload, or text",
+        )
+    return type, url, content, str_to_bool(delete_source), file
+
+
+@router.post("/sources/{source_id}/replace", response_model=SourceResponse)
+async def replace_source_content(
+    source_id: str,
+    form_data: tuple[str, Optional[str], Optional[str], bool, Optional[UploadFile]] = (
+        Depends(parse_replace_form_data)
+    ),
+):
+    """Replace a source's content in place: same source_id, same chat/
+    notebook links, re-run through the ingestion pipeline. Reuses the same
+    no-duplicate-chunks logic as retry (embed_source_command deletes the
+    old source_embedding rows before inserting the new ones - see
+    commands/embedding_commands.py) and additionally clears the old
+    source_insight rows, since insights generated from the *previous*
+    content would otherwise look like they describe the new content.
+    """
+    type_, url, content, delete_source_flag, upload_file = form_data
+    file_path: Optional[str] = None
+
+    try:
+        source = await Source.get(source_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="Source not found")
+
+        if upload_file and type_ == "upload":
+            try:
+                file_path, _ = await save_uploaded_file(upload_file)
+            except Exception as e:
+                logger.error(f"File upload failed: {e}")
+                raise HTTPException(status_code=400, detail="File upload failed")
+
+        replace_request = SourceCreate(
+            type=type_,
+            url=url,
+            content=content,
+            file_path=file_path,
+            delete_source=delete_source_flag,
+        )
+        content_state = await _build_content_state(replace_request, file_path)
+
+        notebook_ids = await _get_source_notebook_ids(source_id)
+
+        # Clear insights generated from the content being replaced. Their
+        # embeddings (source_insight has no separate embedding table entry
+        # beyond its own `embedding` field) go with them via the delete.
+        try:
+            await repo_query(
+                "DELETE source_insight WHERE source = $source_id",
+                {"source_id": ensure_record_id(source_id)},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to clear stale insights before replacing source {source_id}: {e}"
+            )
+
+        import commands.source_commands  # noqa: F401
+
+        command_input = SourceProcessingInput(
+            source_id=str(source.id),
+            content_state=content_state,
+            notebook_ids=notebook_ids,
+            transformations=[],
+            embed=True,
+        )
+        command_id = await CommandService.submit_command_job(
+            "open_notebook",
+            "process_source",
+            command_input.model_dump(),
+        )
+        logger.info(
+            f"Submitted replace-content command: {command_id} for source {source_id}"
+        )
+
+        source.command = ensure_record_id(command_id)
+        await source.save()
+
+        embedded_chunks = await source.get_embedded_chunks()
+        return _source_to_response(
+            source,
+            embedded_chunks=embedded_chunks,
+            command_id=command_id,
+            status="queued",
+            processing_info={"replace": True, "queued": True},
+        )
+
+    except HTTPException:
+        _cleanup_uploaded_file(file_path, upload_file)
+        raise
+    except OpenNotebookError:
+        _cleanup_uploaded_file(file_path, upload_file)
+        raise
+    except Exception as e:
+        logger.error(f"Error replacing content for source {source_id}: {str(e)}")
+        _cleanup_uploaded_file(file_path, upload_file)
+        raise HTTPException(status_code=500, detail="Error replacing source content")
 
 
 @router.delete("/sources/{source_id}")

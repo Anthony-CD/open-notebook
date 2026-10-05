@@ -2,6 +2,8 @@ import apiClient from './client'
 import { getApiUrl } from '@/lib/config'
 import {
   PodcastEpisode,
+  PodcastEpisodeOrganizationUpdate,
+  PodcastGenerationEstimate,
   EpisodeProfile,
   SpeakerProfile,
   Language,
@@ -43,6 +45,47 @@ export const podcastsApi = {
   retryEpisode: async (episodeId: string) => {
     const response = await apiClient.post<{ job_id: string; message: string }>(
       `/podcasts/episodes/${episodeId}/retry`
+    )
+    return response.data
+  },
+
+  updateEpisodeOrganization: async (
+    episodeId: string,
+    payload: PodcastEpisodeOrganizationUpdate
+  ) => {
+    const response = await apiClient.patch<PodcastEpisode>(
+      `/podcasts/episodes/${episodeId}`,
+      payload
+    )
+    return response.data
+  },
+
+  cancelEpisodeJob: async (jobId: string) => {
+    // Reuses the generic job-cancel endpoint (commands/cancel_guard.py already
+    // makes it safe for any surreal-commands job, podcasts included) rather
+    // than adding a podcast-specific cancel route.
+    const response = await apiClient.post<{
+      job_id: string
+      status: string
+      canceled: boolean
+    }>(`/commands/jobs/${jobId}/cancel`)
+    return response.data
+  },
+
+  estimateGeneration: async (params: {
+    episodeProfile: string
+    speakerProfile: string
+    estimatedInputTokens?: number
+  }) => {
+    const response = await apiClient.get<PodcastGenerationEstimate>(
+      '/podcasts/estimate',
+      {
+        params: {
+          episode_profile: params.episodeProfile,
+          speaker_profile: params.speakerProfile,
+          estimated_input_tokens: params.estimatedInputTokens,
+        },
+      }
     )
     return response.data
   },

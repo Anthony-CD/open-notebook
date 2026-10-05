@@ -247,6 +247,17 @@ class PodcastEpisode(ObjectModel):
     command: Optional[Union[str, RecordID]] = Field(
         default=None, description="Link to surreal-commands job"
     )
+    # Optional (not plain bool/list) to tolerate a raw NONE from SurrealDB on
+    # the off chance a row is read before migration 31's backfill UPDATE
+    # reaches it - mirrors Notebook.archived / Source.archived above.
+    favorited: Optional[bool] = Field(
+        default=False,
+        description="User-toggled favorite flag (migration 31).",
+    )
+    tags: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Free-text organization tags (migration 31).",
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

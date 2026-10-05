@@ -6,7 +6,8 @@ import { getApiErrorMessage } from '@/lib/utils/error-handler'
 import {
   CreateTransformationRequest,
   UpdateTransformationRequest,
-  ExecuteTransformationRequest
+  ExecuteTransformationRequest,
+  EstimateTransformationCostRequest,
 } from '@/lib/types/transformations'
 
 // Add to QUERY_KEYS in query-client.ts
@@ -14,6 +15,8 @@ export const TRANSFORMATION_QUERY_KEYS = {
   transformations: ['transformations'] as const,
   transformation: (id: string) => ['transformations', id] as const,
   defaultPrompt: ['transformations', 'default-prompt'] as const,
+  resultHistory: (transformationId: string, sourceId: string) =>
+    ['transformations', transformationId, 'results', sourceId] as const,
 }
 
 export function useTransformations() {
@@ -119,6 +122,52 @@ export function useExecuteTransformation() {
         variant: 'destructive',
       })
     },
+  })
+}
+
+export function usePreviewTransformation() {
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: (data: { prompt: string; sample_text?: string | null }) =>
+      transformationsApi.preview(data),
+    onError: (error: unknown) => {
+      toast({
+        title: t('common.error'),
+        description: getApiErrorMessage(error, (key) => t(key)),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
+export function useEstimateTransformationCost() {
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: (data: EstimateTransformationCostRequest) =>
+      transformationsApi.estimateCost(data),
+    onError: (error: unknown) => {
+      toast({
+        title: t('common.error'),
+        description: getApiErrorMessage(error, (key) => t(key)),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
+export function useTransformationResultHistory(
+  transformationId?: string,
+  sourceId?: string,
+  options?: { enabled?: boolean }
+) {
+  return useQuery({
+    queryKey: TRANSFORMATION_QUERY_KEYS.resultHistory(transformationId ?? '', sourceId ?? ''),
+    queryFn: () => transformationsApi.getResultHistory(transformationId ?? '', sourceId ?? ''),
+    enabled: !!transformationId && !!sourceId && (options?.enabled ?? true),
   })
 }
 

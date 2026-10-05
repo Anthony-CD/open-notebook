@@ -1,0 +1,4 @@
+-- Down-migration for 31: remove podcast episode favorites/tags fields.
+
+REMOVE FIELD IF EXISTS favorited ON TABLE episode;
+REMOVE FIELD IF EXISTS tags ON TABLE episode;

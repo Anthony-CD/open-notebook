@@ -1,0 +1,7 @@
+-- Migration 30 rollback: drop the source lifecycle fields added above.
+
+REMOVE INDEX IF EXISTS idx_source_content_hash ON TABLE source;
+
+REMOVE FIELD IF EXISTS content_hash ON TABLE source;
+REMOVE FIELD IF EXISTS duplicate_of ON TABLE source;
+REMOVE FIELD IF EXISTS archived ON TABLE source;

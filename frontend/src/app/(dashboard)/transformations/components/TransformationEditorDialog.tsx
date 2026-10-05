@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useMemo } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { Controller, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -11,6 +11,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { MarkdownEditor } from '@/components/ui/markdown-editor'
+import { Eye, Loader2 } from 'lucide-react'
 import {
   Select,
   SelectContent,
@@ -22,6 +23,7 @@ import {
   useCreateTransformation,
   useUpdateTransformation,
   useTransformation,
+  usePreviewTransformation,
 } from '@/lib/hooks/use-transformations'
 import { useModels } from '@/lib/hooks/use-models'
 import { Transformation } from '@/lib/types/transformations'
@@ -56,6 +58,7 @@ export function TransformationEditorDialog({ open, onOpenChange, transformation 
   const descriptionId = useId()
   const promptId = useId()
   const modelId = useId()
+  const sampleTextId = useId()
   const isEditing = Boolean(transformation)
   const { data: fetchedTransformation, isLoading } = useTransformation(transformation?.id ?? '', {
     enabled: open && Boolean(transformation?.id),
@@ -69,9 +72,15 @@ export function TransformationEditorDialog({ open, onOpenChange, transformation 
   const updateTransformation = useUpdateTransformation()
   const queryClient = useQueryClient()
 
+  const previewTransformation = usePreviewTransformation()
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [sampleText, setSampleText] = useState('')
+  const [previewResult, setPreviewResult] = useState<{ system_prompt: string; sample_input: string } | null>(null)
+
   const {
     control,
     handleSubmit,
+    getValues,
     formState: { errors },
     reset,
   } = useForm<TransformationFormData>({
@@ -141,7 +150,23 @@ export function TransformationEditorDialog({ open, onOpenChange, transformation 
 
   const handleClose = () => {
     reset()
+    setPreviewOpen(false)
+    setPreviewResult(null)
+    setSampleText('')
     onOpenChange(false)
+  }
+
+  const handlePreview = async () => {
+    const prompt = getValues('prompt')
+    if (!prompt || !prompt.trim()) {
+      return
+    }
+    const result = await previewTransformation.mutateAsync({
+      prompt,
+      sample_text: sampleText.trim() || undefined,
+    })
+    setPreviewResult(result)
+    setPreviewOpen(true)
   }
 
   const isSaving = transformation ? updateTransformation.isPending : createTransformation.isPending
@@ -300,6 +325,33 @@ export function TransformationEditorDialog({ open, onOpenChange, transformation 
                  <p className="text-xs text-muted-foreground mt-3">
                    {t('transformations.promptHint')}
                  </p>
+
+                <div className="mt-4 space-y-2">
+                  <Label htmlFor={sampleTextId} className="text-sm font-medium">
+                    {t('transformations.previewSampleLabel')}
+                  </Label>
+                  <Textarea
+                    id={sampleTextId}
+                    value={sampleText}
+                    onChange={(e) => setSampleText(e.target.value)}
+                    placeholder={t('transformations.previewSamplePlaceholder')}
+                    rows={3}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handlePreview}
+                    disabled={previewTransformation.isPending}
+                  >
+                    {previewTransformation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Eye className="h-4 w-4 mr-2" />
+                    )}
+                    {t('transformations.previewButton')}
+                  </Button>
+                </div>
               </div>
             </>
           )}
@@ -318,6 +370,36 @@ export function TransformationEditorDialog({ open, onOpenChange, transformation 
           </div>
         </form>
       </DialogContent>
+
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="sm:max-w-3xl w-full max-h-[85vh] overflow-y-auto">
+          <DialogTitle>{t('transformations.previewTitle')}</DialogTitle>
+          <DialogDescription>{t('transformations.previewDesc')}</DialogDescription>
+
+          {previewResult && (
+            <div className="space-y-4">
+              <div>
+                <p className="text-sm font-medium mb-1">{t('transformations.systemPrompt')}</p>
+                <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-sm font-mono">
+                  {previewResult.system_prompt}
+                </pre>
+              </div>
+              <div>
+                <p className="text-sm font-medium mb-1">{t('transformations.previewUserMessageLabel')}</p>
+                <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-sm font-mono">
+                  {previewResult.sample_input}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <Button type="button" variant="outline" onClick={() => setPreviewOpen(false)}>
+              {t('common.close')}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   )
 }

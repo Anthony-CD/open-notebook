@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
 from loguru import logger
@@ -10,9 +10,12 @@ from api.models import (
     GradeFlashcardResponse,
     ReviewFlashcardRequest,
     ReviewFlashcardResponse,
+    StudyMetricsResponse,
     StudySetGenerationResponse,
     StudySetListResponse,
     StudySetResponse,
+    SuspendFlashcardRequest,
+    SuspendFlashcardResponse,
 )
 from api.study_service import StudyService
 from open_notebook.exceptions import OpenNotebookError
@@ -150,6 +153,29 @@ async def list_notebook_study_sets(notebook_id: str):
         raise HTTPException(status_code=500, detail="Failed to list study sets")
 
 
+@router.get("/study/metrics", response_model=StudyMetricsResponse)
+async def get_study_metrics(notebook_id: Optional[str] = None):
+    """Honest study metrics: cards due today, rolling recall accuracy, and
+    weak sources (lowest-accuracy source groups), optionally scoped to one
+    notebook. No invented score/streak/XP - see
+    StudyService.get_metrics docstring for exactly how each number is
+    computed.
+
+    Registered before /study/{study_set_id} so "metrics" isn't swallowed by
+    that dynamic path.
+    """
+    try:
+        metrics = await StudyService.get_metrics(notebook_id)
+        return StudyMetricsResponse(**metrics)
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error computing study metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to compute study metrics")
+
+
 @router.get("/study/{study_set_id}", response_model=StudySetResponse)
 async def get_study_set(study_set_id: str):
     """Get a specific study set."""
@@ -259,6 +285,38 @@ async def grade_flashcard_item(
     except Exception as e:
         logger.error(f"Error grading flashcard: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to grade flashcard answer")
+
+
+@router.post(
+    "/study/{study_set_id}/items/{item_index}/suspend",
+    response_model=SuspendFlashcardResponse,
+)
+async def suspend_flashcard_item(
+    study_set_id: str, item_index: int, request: SuspendFlashcardRequest
+):
+    """Suspend or resume one flashcard - pauses/unpauses its spaced-
+    repetition schedule without deleting it (see
+    open_notebook/study/models.py::StudySet.set_item_suspended). A suspended
+    card is excluded from due_count/next_due (and therefore the guided
+    review queue) until it's resumed. Only valid for flashcard study sets.
+    """
+    try:
+        result = await StudyService.set_item_suspended(
+            study_set_id, item_index, request.suspended
+        )
+        return SuspendFlashcardResponse(
+            study_set_id=study_set_id,
+            item_index=item_index,
+            item=result["item"],
+            due_count=result["due_count"],
+        )
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error suspending flashcard: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update card")
 
 
 @router.delete("/study/{study_set_id}")

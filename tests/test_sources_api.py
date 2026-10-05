@@ -73,7 +73,12 @@ class TestAsyncSourceAssetPersistence:
     ):
         """POST /sources with type=upload and async_processing=true persists Asset(file_path=...)."""
         mock_nb_get.return_value = MagicMock()
-        mock_upload.return_value = os.path.join(os.path.abspath(UPLOADS_FOLDER), "video.mp4")
+        # save_uploaded_file() now returns (file_path, content_hash) - the
+        # hash feeds the duplicate pre-check added for P1 ingestion work.
+        mock_upload.return_value = (
+            os.path.join(os.path.abspath(UPLOADS_FOLDER), "video.mp4"),
+            "fakehash",
+        )
         mock_submit.return_value = "command:123"
 
         saved_sources = []

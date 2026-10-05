@@ -161,6 +161,52 @@ export function useGradeFlashcardAnswer(studySetId: string, notebookId?: string)
 }
 
 /**
+ * Suspends or resumes one flashcard's spaced-repetition schedule without
+ * deleting it. Same optimistic cache-patch shape as useReviewFlashcard.
+ */
+export function useSuspendFlashcard(studySetId: string, notebookId?: string) {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: ({ itemIndex, suspended }: { itemIndex: number; suspended: boolean }) =>
+      studyApi.suspendFlashcard(studySetId, itemIndex, suspended),
+    onSuccess: (response) => {
+      queryClient.setQueryData<StudySet>(QUERY_KEYS.studySet(studySetId), (prev) => {
+        if (!prev) return prev
+        const items = [...(prev.items as FlashcardItem[])]
+        items[response.item_index] = response.item
+        return { ...prev, items, due_count: response.due_count }
+      })
+      if (notebookId) {
+        queryClient.invalidateQueries({ queryKey: QUERY_KEYS.studySetsForNotebook(notebookId) })
+      }
+      queryClient.invalidateQueries({ queryKey: ['study', 'metrics'] })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: t('study.suspendFailed'),
+        description: getApiErrorKey(error, t('common.error')),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
+/**
+ * Honest study metrics (due today, rolling recall accuracy, weak sources) -
+ * optionally scoped to one notebook. See api/study_service.py::
+ * StudyService.get_metrics for exactly how each number is computed.
+ */
+export function useStudyMetrics(notebookId?: string) {
+  return useQuery({
+    queryKey: QUERY_KEYS.studyMetrics(notebookId),
+    queryFn: () => studyApi.getMetrics(notebookId),
+  })
+}
+
+/**
  * `notebookId` scopes cache invalidation to a single notebook's study set
  * list (e.g. the detail page, which knows its own notebook). Omit it (e.g.
  * the cross-notebook list page) to invalidate every notebook's study set

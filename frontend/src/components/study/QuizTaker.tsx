@@ -166,6 +166,12 @@ export function QuizTaker({ items, studySetName }: QuizTakerProps) {
                     {item.explanation}
                   </p>
                 ) : null}
+                {graded && item.source_title ? (
+                  <p className="text-xs text-muted-foreground">
+                    <span className="font-semibold">{t('study.sourceLabel')}:</span>{' '}
+                    {item.source_title}
+                  </p>
+                ) : null}
               </CardContent>
             </Card>
           )

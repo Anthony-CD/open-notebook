@@ -5,6 +5,11 @@ export function todayIso(): string {
 }
 
 export function isDue(item: FlashcardItem, today: string): boolean {
+  // A suspended card (StudySet.set_item_suspended) never counts as due -
+  // that's the whole point of suspending it: pause its schedule without
+  // deleting it. This one check is what keeps suspended cards out of due
+  // counts, the quick-mode "due first" ordering, and the guided queue.
+  if (item.suspended) return false
   return !item.due || item.due <= today
 }
 

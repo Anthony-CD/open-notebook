@@ -265,6 +265,111 @@ class StudyService:
         }
 
     @staticmethod
+    async def set_item_suspended(
+        study_set_id: str, item_index: int, suspended: bool
+    ) -> Dict[str, Any]:
+        """Suspend or resume one flashcard (pause/unpause its spaced-
+        repetition schedule without deleting it)."""
+        study_set = await StudyService.get_study_set(study_set_id)
+        try:
+            updated_item = await study_set.set_item_suspended(item_index, suspended)
+        except InvalidInputError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(
+                f"Failed to set suspended={suspended} on {study_set_id}[{item_index}]: {e}"
+            )
+            raise HTTPException(status_code=500, detail="Failed to update card")
+        return {
+            "item": updated_item,
+            "due_count": study_set.review_stats()["due_count"],
+        }
+
+    @staticmethod
+    async def get_metrics(notebook_id: Optional[str] = None) -> Dict[str, Any]:
+        """Lightweight, honest study metrics - no invented gamification score.
+
+        - due_today: flashcards due for review right now (review_stats()
+          already excludes suspended cards).
+        - accuracy_pct: share of flashcards whose most recent recorded
+          rating (`last_rating`, see score_flashcard_review) was good/easy.
+          None if nothing has been reviewed yet, rather than a misleading 0%.
+        - weak_sources: up to 5 source_title groups with the lowest recall
+          accuracy among their reviewed cards (min 2 reviewed cards per
+          source, so one lucky/unlucky review doesn't swing the list).
+          "Topic" = the source a card was generated from - there is no
+          separate topic/tag taxonomy to hang a richer concept on.
+        - reviewed_cards / total_cards: plain progress counts.
+
+        Only flashcards are counted - quiz sessions aren't persisted
+        (GuidedQuizSession/QuizTaker grade client-side only), so quiz
+        attempts can't honestly contribute to these numbers yet.
+        """
+        if notebook_id:
+            study_sets = await StudyService.list_study_sets(notebook_id)
+        else:
+            try:
+                # Inherited from ObjectModel.get_all() - no study-specific
+                # override needed, "created desc" is the same ordering
+                # get_for_notebook() uses.
+                study_sets = await StudySet.get_all(order_by="created desc")
+            except Exception as e:
+                logger.error(f"Failed to load study sets for metrics: {e}")
+                raise HTTPException(status_code=500, detail="Failed to compute study metrics")
+
+        flashcard_sets = [s for s in study_sets if s.kind == "flashcards"]
+
+        due_today = 0
+        total_cards = 0
+        reviewed_cards = 0
+        correct_reviewed = 0
+        source_stats: Dict[str, Dict[str, int]] = {}
+
+        for study_set in flashcard_sets:
+            due_today += study_set.review_stats()["due_count"]
+            for item in study_set.items:
+                total_cards += 1
+                rating = item.get("last_rating")
+                if not rating:
+                    continue
+                reviewed_cards += 1
+                is_correct = rating in ("good", "easy")
+                if is_correct:
+                    correct_reviewed += 1
+
+                source = item.get("source_title") or None
+                if not source:
+                    continue
+                stats = source_stats.setdefault(source, {"reviewed": 0, "correct": 0})
+                stats["reviewed"] += 1
+                if is_correct:
+                    stats["correct"] += 1
+
+        accuracy_pct = (
+            round(100 * correct_reviewed / reviewed_cards) if reviewed_cards else None
+        )
+
+        weak_sources: List[Dict[str, Any]] = [
+            {
+                "source_title": source,
+                "accuracy_pct": round(100 * stats["correct"] / stats["reviewed"]),
+                "reviewed_count": stats["reviewed"],
+            }
+            for source, stats in source_stats.items()
+            if stats["reviewed"] >= 2
+        ]
+        weak_sources.sort(key=lambda s: (int(s["accuracy_pct"]), -int(s["reviewed_count"])))
+        weak_sources = weak_sources[:5]
+
+        return {
+            "due_today": due_today,
+            "accuracy_pct": accuracy_pct,
+            "reviewed_cards": reviewed_cards,
+            "total_cards": total_cards,
+            "weak_sources": weak_sources,
+        }
+
+    @staticmethod
     async def delete_study_set(study_set_id: str) -> None:
         """Delete a study set."""
         study_set = await StudyService.get_study_set(study_set_id)

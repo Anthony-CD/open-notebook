@@ -15,9 +15,21 @@ from open_notebook.exceptions import InvalidInputError
 # (see docs/7-DEVELOPMENT/prompts.md "format-instructions delegation").
 
 
+_SOURCE_TITLE_DESCRIPTION = (
+    "The exact title from the matching '## Source: <title>' heading in the "
+    "source content that this item's question/answer was drawn from, for a "
+    "lightweight citation in the study UI. Null if the content isn't "
+    "organized into source sections, or if the item draws on more than one "
+    "source and no single one is the clear origin."
+)
+
+
 class Flashcard(BaseModel):
     front: str = Field(..., description="The question, prompt, or term side")
     back: str = Field(..., description="The concise answer or explanation side")
+    source_title: Optional[str] = Field(
+        default=None, description=_SOURCE_TITLE_DESCRIPTION
+    )
 
 
 class FlashcardList(BaseModel):
@@ -29,6 +41,9 @@ class QuizQuestion(BaseModel):
     options: List[str] = Field(..., description="Candidate answers, one of which is correct")
     correct_index: int = Field(..., description="Index into `options` of the correct answer")
     explanation: str = Field(..., description="Why the correct answer is correct")
+    source_title: Optional[str] = Field(
+        default=None, description=_SOURCE_TITLE_DESCRIPTION
+    )
 
 
 class QuizList(BaseModel):
@@ -122,6 +137,13 @@ def score_flashcard_review(
         reps=reps,
         due=due_date,
         last_reviewed=now.isoformat(),
+        # Persisted separately from the SM-2 state above so metrics (honest
+        # accuracy %, weak-source breakdown - see
+        # api/study_service.py::StudyService.get_metrics) can read back what
+        # the student actually reported last time, without re-deriving it
+        # from ease/interval (which drift for reasons other than "was this
+        # card answered correctly", e.g. "hard" still advances the interval).
+        last_rating=rating,
     )
     return updated
 
@@ -238,7 +260,9 @@ class StudySet(ObjectModel):
         Only flashcards carry spaced-repetition state (see
         score_flashcard_review docstring) - quiz sets always report
         due_count=0 rather than showing a misleading "due" badge for a kind
-        that has no review UI/endpoint.
+        that has no review UI/endpoint. Suspended cards (see
+        set_item_suspended) are excluded entirely - pausing a card's
+        schedule means it should never show up as "due", by design.
         """
         if self.kind != "flashcards":
             return {"due_count": 0, "next_due": None}
@@ -247,12 +271,34 @@ class StudySet(ObjectModel):
         due_count = 0
         next_due: Optional[str] = None
         for item in self.items:
+            if item.get("suspended"):
+                continue
             due = item.get("due")
             if not due or due <= today:
                 due_count += 1
             elif next_due is None or due < next_due:
                 next_due = due
         return {"due_count": due_count, "next_due": next_due}
+
+    async def set_item_suspended(self, item_index: int, suspended: bool) -> Dict[str, Any]:
+        """Pause (or resume) spaced-repetition scheduling for one flashcard
+        without deleting it. A suspended card keeps its SM-2 state (ease,
+        interval, reps, due) untouched - it's simply excluded from
+        review_stats()'s due_count/next_due (and therefore from the guided
+        review queue) until it's resumed.
+        """
+        if self.kind != "flashcards":
+            raise InvalidInputError(
+                "Only flashcard study sets support suspending cards"
+            )
+        if item_index < 0 or item_index >= len(self.items):
+            raise InvalidInputError(f"Invalid item index: {item_index}")
+
+        updated_item = dict(self.items[item_index])
+        updated_item["suspended"] = bool(suspended)
+        self.items[item_index] = updated_item
+        await self.save()
+        return updated_item
 
     async def review_flashcard(self, item_index: int, rating: str) -> Dict[str, Any]:
         """Record a self-graded recall outcome for one flashcard and persist
@@ -281,3 +327,4 @@ class StudySet(ObjectModel):
         except Exception as e:
             logger.error(f"Error fetching study sets for notebook {notebook_id}: {e}")
             raise
+

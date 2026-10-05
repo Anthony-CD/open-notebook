@@ -35,6 +35,16 @@ export interface FlashcardItem {
   reps?: number
   ease?: number
   last_reviewed?: string | null
+  /** Most recent rating recorded by score_flashcard_review - drives the
+   * honest accuracy/weak-source metrics (see StudyMetrics below). */
+  last_rating?: SrsRating | null
+  /** True when the card's spaced-repetition schedule is paused - excluded
+   * from due_count/next_due and the guided review queue until resumed. See
+   * api/models.py::SuspendFlashcardRequest. */
+  suspended?: boolean
+  /** Lightweight citation: the source section this card was generated
+   * from, if the generation prompt could identify one. */
+  source_title?: string | null
 }
 
 export interface QuizItem {
@@ -42,6 +52,9 @@ export interface QuizItem {
   options: string[]
   correct_index: number
   explanation?: string | null
+  /** Lightweight citation: the source section this question was generated
+   * from, if the generation prompt could identify one. */
+  source_title?: string | null
 }
 
 /** Matches api/models.py StudySetResponse (GET /api/study/{id}). */
@@ -129,6 +142,42 @@ export interface GradeFlashcardResponse {
   revealed_answer?: string | null
   item: FlashcardItem
   due_count: number
+}
+
+/** Body for POST /study/{id}/items/{index}/suspend - pauses/resumes a
+ * card's spaced-repetition schedule without deleting it. */
+export interface SuspendFlashcardRequest {
+  suspended: boolean
+}
+
+/** Matches api/models.py SuspendFlashcardResponse. */
+export interface SuspendFlashcardResponse {
+  study_set_id: string
+  item_index: number
+  item: FlashcardItem
+  due_count: number
+}
+
+/** One entry in StudyMetrics.weak_sources - matches api/models.py
+ * WeakSourceStat. "Topic" here means the source a card was generated from
+ * (via its source_title citation) - there's no separate topic/tag
+ * taxonomy to hang a richer concept on. */
+export interface WeakSourceStat {
+  source_title: string
+  accuracy_pct: number
+  reviewed_count: number
+}
+
+/** Matches api/models.py StudyMetricsResponse (GET /study/metrics). Every
+ * field is a direct count or plain percentage from recorded review
+ * outcomes - no invented score/streak/XP. */
+export interface StudyMetrics {
+  due_today: number
+  /** Null if nothing has been reviewed yet - never a fabricated 0%. */
+  accuracy_pct: number | null
+  reviewed_cards: number
+  total_cards: number
+  weak_sources: WeakSourceStat[]
 }
 
 export function isStudyJobActive(status?: string | null): boolean {

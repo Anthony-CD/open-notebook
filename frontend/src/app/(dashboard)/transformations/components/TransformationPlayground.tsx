@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Play, Loader2 } from 'lucide-react'
 import { Transformation } from '@/lib/types/transformations'
-import { useExecuteTransformation } from '@/lib/hooks/use-transformations'
+import { useExecuteTransformation, useEstimateTransformationCost } from '@/lib/hooks/use-transformations'
 import { ModelSelector } from '@/components/common/ModelSelector'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import ReactMarkdown from 'react-markdown'
@@ -22,20 +22,48 @@ interface TransformationPlaygroundProps {
   selectedTransformation?: Transformation
 }
 
+function formatCostUsd(amount: number): string {
+  if (amount === 0) return '$0.00'
+  if (amount < 0.01) return `< $0.01`
+  return `$${amount.toFixed(amount < 1 ? 4 : 2)}`
+}
+
 export function TransformationPlayground({ transformations, selectedTransformation }: TransformationPlaygroundProps) {
   const { t } = useTranslation()
   const [selectedId, setSelectedId] = useState(selectedTransformation?.id || '')
   const [inputText, setInputText] = useState('')
   const [modelId, setModelId] = useState('')
   const [output, setOutput] = useState('')
-  
+  const [actualCost, setActualCost] = useState<{ status?: string | null; amount?: number | null } | null>(null)
+
   const executeTransformation = useExecuteTransformation()
+  const estimateCost = useEstimateTransformationCost()
+
+  // Re-estimate (debounced) whenever the inputs that affect cost change -
+  // this is a best-effort ESTIMATE only (real cost is unknown until the
+  // call completes), never calls an LLM itself.
+  useEffect(() => {
+    if (!selectedId || !inputText.trim()) {
+      estimateCost.reset()
+      return
+    }
+    const handle = setTimeout(() => {
+      estimateCost.mutate({
+        transformation_id: selectedId,
+        input_text: inputText,
+        model_id: modelId || undefined,
+      })
+    }, 500)
+    return () => clearTimeout(handle)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, inputText, modelId])
 
   const handleExecute = async () => {
     if (!selectedId || !modelId || !inputText.trim()) {
       return
     }
 
+    setActualCost(null)
     const result = await executeTransformation.mutateAsync({
       transformation_id: selectedId,
       input_text: inputText,
@@ -43,9 +71,11 @@ export function TransformationPlayground({ transformations, selectedTransformati
     })
 
     setOutput(result.output)
+    setActualCost({ status: result.cost_status, amount: result.actual_cost_usd })
   }
 
   const canExecute = selectedId && modelId && inputText.trim() && !executeTransformation.isPending
+  const costEstimate = estimateCost.data
 
   return (
     <div className="space-y-6">
@@ -99,8 +129,32 @@ export function TransformationPlayground({ transformations, selectedTransformati
             />
           </div>
 
+          {selectedId && inputText.trim() && (
+            <div className="rounded-md border bg-muted/50 p-3 text-sm space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">{t('transformations.modelToBeUsed')}</span>
+                <span className="font-medium">
+                  {costEstimate?.model_name ?? (estimateCost.isPending ? t('transformations.previewGenerating') : '—')}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">{t('transformations.estimatedCost')}</span>
+                <span className="font-medium">
+                  {estimateCost.isPending
+                    ? '…'
+                    : costEstimate && costEstimate.cost_status === 'known' && costEstimate.estimated_cost_usd !== null
+                      ? formatCostUsd(costEstimate.estimated_cost_usd)
+                      : costEstimate?.cost_status === 'free'
+                        ? t('transformations.freeModel')
+                        : t('usage.costUnavailable')}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">{t('transformations.estimateDisclaimer')}</p>
+            </div>
+          )}
+
           <div className="flex justify-center">
-            <Button 
+            <Button
               onClick={handleExecute}
               disabled={!canExecute}
               size="lg"
@@ -118,6 +172,19 @@ export function TransformationPlayground({ transformations, selectedTransformati
               )}
             </Button>
           </div>
+
+          {actualCost && (
+            <div className="rounded-md border bg-muted/50 p-3 text-sm flex items-center justify-between">
+              <span className="text-muted-foreground">{t('transformations.actualCost')}</span>
+              <span className="font-medium">
+                {actualCost.status === 'known' && actualCost.amount !== null && actualCost.amount !== undefined
+                  ? formatCostUsd(actualCost.amount)
+                  : actualCost.status === 'free'
+                    ? t('transformations.freeModel')
+                    : t('usage.costUnavailable')}
+              </span>
+            </div>
+          )}
 
           {output && (
             <div className="space-y-2">

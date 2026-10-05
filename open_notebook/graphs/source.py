@@ -15,6 +15,7 @@ from open_notebook.domain.content_settings import ContentSettings
 from open_notebook.domain.notebook import Asset, Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.graphs.transformation import graph as transform_graph
+from open_notebook.utils.content_hash import compute_content_hash
 from open_notebook.utils.runtime_capabilities import engine_runtime_missing
 
 # Preferred languages for YouTube transcript selection. content-core's own
@@ -44,6 +45,11 @@ class SourceState(TypedDict):
     source: Source
     transformation: Annotated[list, operator.add]
     embed: bool
+    # sha256 for duplicate detection - computed in content_process() (file
+    # bytes for uploads, extracted text for links/text) and persisted in
+    # save_source(). Optional: absent if hashing itself failed, which must
+    # never fail the whole ingestion.
+    content_hash: Optional[str]
 
 
 class TransformationState(TypedDict):
@@ -70,6 +76,33 @@ def _usable_engine(engine: str, kind: str) -> str:
         f"Set {missing_env_var}=true to enable it (see ADR-007)."
     )
     return "auto"
+
+
+def _compute_source_content_hash(
+    file_path: Optional[str], extracted_content: Optional[str]
+) -> Optional[str]:
+    """Derive the duplicate-detection hash for a just-extracted source.
+
+    File-backed sources (uploads) hash the raw bytes on disk - the
+    extracted/OCR'd text can vary run to run even for the same file, which
+    would make the hash useless for exact-duplicate detection. Non-file
+    sources (links, text) hash the extracted text itself, since that's the
+    only stable content available for them.
+
+    Returns None (never raises) on any failure - duplicate detection is a
+    UX nicety, not a correctness requirement, so it must never fail
+    ingestion.
+    """
+    try:
+        if file_path:
+            with open(file_path, "rb") as f:
+                return compute_content_hash(f.read())
+        if extracted_content and extracted_content.strip():
+            return compute_content_hash(extracted_content)
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to compute content hash for duplicate detection: {e}")
+        return None
 
 
 async def content_process(state: SourceState) -> dict:
@@ -178,6 +211,12 @@ async def content_process(state: SourceState) -> dict:
             "The content may be empty, inaccessible, or in an unsupported format."
         )
 
+    # Hash raw file bytes / extracted text for duplicate detection BEFORE the
+    # delete_source cleanup below, which can unlink the uploaded file.
+    content_hash = _compute_source_content_hash(
+        content_state.get("file_path"), processed.content
+    )
+
     # content-core 2.x no longer deletes the uploaded source file after
     # extraction (the delete_source flag it used to honor is gone). Preserve the
     # previous auto-delete behavior on our side.
@@ -190,7 +229,7 @@ async def content_process(state: SourceState) -> dict:
         except Exception as e:
             logger.warning(f"Failed to delete source file {file_path}: {e}")
 
-    return {"extraction": processed}
+    return {"extraction": processed, "content_hash": content_hash}
 
 
 async def save_source(state: SourceState) -> dict:
@@ -212,6 +251,25 @@ async def save_source(state: SourceState) -> dict:
     # Preserve user-set title; only overwrite placeholder or empty titles
     if extraction.title and (not source.title or source.title == "Processing..."):
         source.title = extraction.title
+
+    # Duplicate detection: persist the hash computed in content_process(), and
+    # look for another source sharing it in one of this source's notebooks.
+    # Re-evaluated on every run (including retries), so a source that no
+    # longer matches anything (e.g. the other source was deleted, or this
+    # content genuinely changed) has duplicate_of cleared rather than stuck
+    # pointing at a stale match.
+    content_hash = state.get("content_hash")
+    source.content_hash = content_hash
+    if content_hash:
+        try:
+            duplicate = await Source.find_duplicate(
+                content_hash, state.get("notebook_ids") or [], exclude_id=source.id
+            )
+            source.duplicate_of = duplicate.id if duplicate else None
+        except Exception as e:
+            logger.warning(f"Duplicate check failed for source {source.id}: {e}")
+    else:
+        source.duplicate_of = None
 
     await source.save()
 

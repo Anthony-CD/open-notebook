@@ -244,6 +244,12 @@ export function GuidedQuizSession({ items, onSessionComplete }: GuidedQuizSessio
                   {item.explanation}
                 </p>
               ) : null}
+              {item.source_title ? (
+                <p className="text-xs text-muted-foreground">
+                  <span className="font-semibold">{t('study.sourceLabel')}:</span>{' '}
+                  {item.source_title}
+                </p>
+              ) : null}
               {revealed ? (
                 <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-foreground">
                   <span className="font-semibold">
