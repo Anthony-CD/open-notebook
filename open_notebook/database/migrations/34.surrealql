@@ -1,0 +1,25 @@
+-- Migration 34: Audit log (P2 "Seguridad")
+--
+-- NOTE: originally authored as migration 33, renumbered to 34 after a
+-- parallel agent claimed 33 first for the usage_event attempt_id
+-- idempotency key - see 33.surrealql.
+--
+-- Records sensitive actions (deletions, credential add/remove, Drive
+-- connect/disconnect, data export/delete, failed login attempts) for the
+-- activity-history / privacy-center feature.
+--
+-- This is NOT a per-user audit trail. Open Notebook is single-user/
+-- household-scale with one shared OPEN_NOTEBOOK_PASSWORD (see AGENTS.md,
+-- PDR-001) - there is no per-user identity to attribute an action to.
+-- `detail` is deliberately short and non-sensitive (a title, a count, a
+-- provider name) - NEVER full content of what was deleted/exported and
+-- NEVER secret values (API keys, tokens, passwords).
+
+DEFINE TABLE IF NOT EXISTS audit_log SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS action ON TABLE audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS detail ON TABLE audit_log TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE audit_log TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated ON TABLE audit_log TYPE datetime DEFAULT time::now() VALUE time::now();
+
+DEFINE INDEX IF NOT EXISTS idx_audit_log_created ON TABLE audit_log COLUMNS created CONCURRENTLY;
+DEFINE INDEX IF NOT EXISTS idx_audit_log_action ON TABLE audit_log COLUMNS action CONCURRENTLY;

@@ -107,8 +107,8 @@ export function TransformationCard({ transformation, onPlayground, onEdit }: Tra
       <ConfirmDialog
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
-        title={t('sources.delete')}
-        description={t('transformations.deleteConfirm')}
+        title={t('transformations.deleteTitle')}
+        description={t('transformations.deleteConfirm', { name: transformation.name })}
         confirmText={t('common.delete')}
         confirmVariant="destructive"
         onConfirm={handleDelete}

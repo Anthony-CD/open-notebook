@@ -6,6 +6,17 @@ export interface Model {
   credential?: string | null
   created: string
   updated: string
+
+  // Honest, best-effort metadata (P2 "Modelos, costo y confianza") - see
+  // api/models.py ModelResponse. context_window/capabilities are
+  // undefined/[] when genuinely not known (most direct-provider models
+  // today), never a fabricated guess.
+  context_window?: number | null
+  capabilities?: string[]
+  /** Whether `capabilities` reflects real catalog data. False means "not
+   * tracked for this provider", not "confirmed no capabilities". */
+  capabilities_known?: boolean
+  metadata_source?: string | null
 }
 
 export interface CreateModelRequest {

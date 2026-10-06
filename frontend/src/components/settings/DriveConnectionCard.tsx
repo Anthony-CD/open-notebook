@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import { HardDrive, CheckCircle2, Loader2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useToast } from '@/lib/hooks/use-toast'
 import { useDriveStatus, useConnectDrive, useDisconnectDrive } from '@/lib/hooks/use-drive'
@@ -27,6 +28,13 @@ export function DriveConnectionCard() {
   const connect = useConnectDrive()
   const disconnect = useDisconnectDrive()
   const handledRedirectRef = useRef(false)
+  const [confirmDisconnectOpen, setConfirmDisconnectOpen] = useState(false)
+
+  const handleDisconnect = () => {
+    disconnect.mutate(undefined, {
+      onSuccess: () => setConfirmDisconnectOpen(false),
+    })
+  }
 
   useEffect(() => {
     if (!searchParams || handledRedirectRef.current) return
@@ -86,7 +94,7 @@ export function DriveConnectionCard() {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => disconnect.mutate()}
+                onClick={() => setConfirmDisconnectOpen(true)}
                 disabled={disconnect.isPending}
                 className="shrink-0 border-fern text-fern hover:bg-fern-tint"
               >
@@ -116,6 +124,17 @@ export function DriveConnectionCard() {
           </div>
         )}
       </CardContent>
+
+      <ConfirmDialog
+        open={confirmDisconnectOpen}
+        onOpenChange={setConfirmDisconnectOpen}
+        title={t('drive.disconnectConfirmTitle')}
+        description={t('drive.disconnectConfirmDesc')}
+        confirmText={t('drive.disconnect')}
+        confirmVariant="destructive"
+        onConfirm={handleDisconnect}
+        isLoading={disconnect.isPending}
+      />
     </Card>
   )
 }

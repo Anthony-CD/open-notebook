@@ -54,6 +54,11 @@ class UsageEvent(ObjectModel):
     pricing_version: Optional[str] = None
     failed: bool = False
     error_type: Optional[str] = None
+    # One per model-invocation attempt (migration 33) - set by
+    # UsageTrackingCallbackHandler so each attempt's event is traceable and
+    # the handler can prove to itself it has written at most one event per
+    # attempt. None on rows written before migration 33.
+    attempt_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Legacy aggregate (kept for compatibility; known-cost rows only)
@@ -175,6 +180,106 @@ class UsageEvent(ObjectModel):
         except Exception as e:
             logger.warning(f"Budget check failed, treating as over-budget: {e}")
             return False
+
+
+async def get_budget_limits() -> Dict[str, Optional[float]]:
+    """Configured budget limits from Settings (P2 "Modelos, costo y confianza").
+
+    Returns `{"daily_usd": Optional[float], "monthly_usd": float}`.
+    `monthly_usd` falls back to the legacy `STUDY_BUDGET_USD` env var
+    (default $10) when no monthly limit is configured in Settings, so
+    existing env-only setups keep working unchanged. `daily_usd` is None
+    when no daily cap is configured (it's an opt-in feature - there was no
+    daily limit before this). Never raises: any failure reading Settings
+    falls back to "no daily cap" / the env-var monthly default.
+    """
+    monthly = float(os.getenv(STUDY_BUDGET_ENV_VAR, str(DEFAULT_STUDY_BUDGET_USD)))
+    daily: Optional[float] = None
+    try:
+        from open_notebook.domain.content_settings import ContentSettings
+
+        settings = await ContentSettings.get_instance()
+        if settings is not None:
+            if settings.monthly_budget_usd is not None:
+                monthly = float(settings.monthly_budget_usd)
+            if settings.daily_budget_usd is not None:
+                daily = float(settings.daily_budget_usd)
+    except Exception as e:
+        logger.warning(f"Failed to read configured budgets, using defaults: {e}")
+    return {"daily_usd": daily, "monthly_usd": monthly}
+
+
+async def _known_spend_since(since: datetime) -> float:
+    rows = await UsageEvent.fetch_rows(since, None)
+    return aggregate_events(rows)["cost"]["known_usd"]
+
+
+async def get_budget_status() -> Dict[str, Any]:
+    """Known-cost spend vs configured limits for the current UTC day/month.
+
+    Backs the Settings budget panel and the pre-expensive-operation check
+    (`check_operation_against_budget` below / `api/usage_service.py`). Only
+    known-cost events count toward spend - the same honest semantics as
+    `UsageEvent.get_current_spend_usd()` (unknown-cost calls can't be
+    counted toward a dollar limit, so real spend may be understated when
+    `cost.unknown_cost_events > 0`).
+    """
+    limits = await get_budget_limits()
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    daily_spend = 0.0
+    monthly_spend = 0.0
+    try:
+        daily_spend = await _known_spend_since(day_start)
+    except Exception as e:
+        logger.warning(f"Failed to compute daily spend for budget status: {e}")
+    try:
+        monthly_spend = await _known_spend_since(month_start)
+    except Exception as e:
+        logger.warning(f"Failed to compute monthly spend for budget status: {e}")
+
+    def _period(limit: Optional[float], spent: float) -> Dict[str, Any]:
+        remaining = None if limit is None else round(limit - spent, 10)
+        return {
+            "limit_usd": limit,
+            "spent_usd": round(spent, 10),
+            "remaining_usd": remaining,
+            "is_over": limit is not None and spent >= limit,
+        }
+
+    return {
+        "daily": _period(limits["daily_usd"], daily_spend),
+        "monthly": _period(limits["monthly_usd"], monthly_spend),
+    }
+
+
+async def check_operation_against_budget(estimated_cost_usd: float) -> Dict[str, Any]:
+    """Would a planned operation costing `estimated_cost_usd` push spend over
+    either configured limit?
+
+    Never blocks by itself - it only reports `would_exceed_daily` /
+    `would_exceed_monthly` alongside the current status so the caller (the
+    API / frontend) can surface a confirmation with the estimate vs
+    remaining budget, instead of silently blocking or silently proceeding
+    (P2 item 3).
+    """
+    status = await get_budget_status()
+    estimated = max(float(estimated_cost_usd or 0.0), 0.0)
+
+    def _would_exceed(period: Dict[str, Any]) -> bool:
+        limit = period["limit_usd"]
+        if limit is None:
+            return False
+        return (period["spent_usd"] + estimated) > limit
+
+    return {
+        **status,
+        "estimated_cost_usd": estimated,
+        "would_exceed_daily": _would_exceed(status["daily"]),
+        "would_exceed_monthly": _would_exceed(status["monthly"]),
+    }
 
 
 def _int(value: Any) -> int:

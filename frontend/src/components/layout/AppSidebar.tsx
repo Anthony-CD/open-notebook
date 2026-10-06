@@ -43,6 +43,7 @@ import {
   Wrench,
   Command,
   GraduationCap,
+  ShieldAlert,
 } from 'lucide-react'
 
 const getNavigation = (t: TFunction) => [
@@ -72,6 +73,7 @@ const getNavigation = (t: TFunction) => [
       { name: t('navigation.models'), href: '/settings/api-keys', icon: Bot, iconClass: undefined },
       { name: t('navigation.transformations'), href: '/transformations', icon: Shuffle, iconClass: undefined },
       { name: t('navigation.settings'), href: '/settings', icon: Settings, iconClass: undefined },
+      { name: t('privacy.navLabel'), href: '/settings/privacy', icon: ShieldAlert, iconClass: undefined },
       { name: t('navigation.advanced'), href: '/advanced', icon: Wrench, iconClass: undefined },
     ],
   },
@@ -195,7 +197,7 @@ export function AppSidebar() {
           <div
             className={cn(
               'mb-4',
-              isCollapsed ? 'px-0' : 'px-3'
+              isCollapsed ? 'flex justify-center px-0' : 'px-3'
             )}
           >
             <DropdownMenu open={createMenuOpen} onOpenChange={setCreateMenuOpen}>
@@ -207,7 +209,7 @@ export function AppSidebar() {
                         onClick={() => setCreateMenuOpen(true)}
                         variant="default"
                         size="sm"
-                        className="w-full justify-center px-2 font-display font-bold"
+                        className="h-11 w-11 justify-center px-2 font-display font-bold"
                         aria-label={t('common.create')}
                       >
                         <Plus className="h-4 w-4" />
@@ -286,7 +288,10 @@ export function AppSidebar() {
               )}
               <div className="space-y-1">
                 {!isCollapsed && (
-                  <h3 className="mb-1.5 px-3 text-[10.5px] font-bold uppercase tracking-[0.14em] text-sidebar-foreground/40">
+                  // text-sidebar-foreground/40 measured 2.3:1 against the
+                  // sidebar background (WCAG AA needs 4.5:1 for text this
+                  // size) - bumped to /70, which clears it in both themes.
+                  <h3 className="mb-1.5 px-3 text-[10.5px] font-bold uppercase tracking-[0.14em] text-sidebar-foreground/70">
                     {section.title}
                   </h3>
                 )}
@@ -300,7 +305,10 @@ export function AppSidebar() {
                         'w-full gap-2.5 text-[13px] font-medium text-sidebar-foreground/80 sidebar-menu-item relative',
                         isActive &&
                           'bg-popover font-semibold text-sidebar-foreground ring-1 ring-inset ring-border before:absolute before:-left-1.5 before:top-[7px] before:bottom-[7px] before:w-[3px] before:rounded-[2px] before:bg-fern',
-                        isCollapsed ? 'justify-center px-2' : 'justify-start'
+                        // Collapsed is also the forced mobile state (see
+                        // isCollapsed above) - bump to a 44px touch target
+                        // there; the expanded desktop row stays h-9.
+                        isCollapsed ? 'h-11 w-11 justify-center px-2' : 'justify-start'
                       )}
                     >
                       <item.icon className={cn('h-4 w-4 opacity-85', item.iconClass)} />
@@ -347,7 +355,10 @@ export function AppSidebar() {
 
           {/* Command Palette hint */}
           {!isCollapsed && (
-            <div className="px-3 py-1.5 text-xs text-sidebar-foreground/60">
+            // Both hint lines used to sit at /60 and /40 opacity - 3.95:1
+            // and 2.3:1 against the sidebar background, below the 4.5:1 AA
+            // floor for text this size. Bumped to /80 and /70.
+            <div className="px-3 py-1.5 text-xs text-sidebar-foreground/80">
               <div className="flex items-center justify-between">
                  <span className="flex items-center gap-1.5">
                   <Command className="h-3 w-3" />
@@ -357,7 +368,7 @@ export function AppSidebar() {
                   {isMac ? <span className="text-xs">⌘</span> : <span>Ctrl+</span>}K
                 </kbd>
               </div>
-               <p className="mt-1 text-[10px] text-sidebar-foreground/40">
+               <p className="mt-1 text-[10px] text-sidebar-foreground/70">
                 {t('common.quickActionsDesc')}
               </p>
             </div>
@@ -401,7 +412,7 @@ export function AppSidebar() {
               <TooltipTrigger asChild>
                 <Button
                   variant="outline"
-                  className="w-full justify-center sidebar-menu-item"
+                  className="h-11 w-full justify-center sidebar-menu-item"
                   onClick={logout}
                   aria-label={t('common.signOut')}
                 >

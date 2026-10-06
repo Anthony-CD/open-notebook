@@ -1,3 +1,4 @@
+import uuid
 from typing import Any, List, Optional, Tuple
 
 from esperanto import LanguageModel
@@ -7,6 +8,7 @@ from langchain_core.outputs import LLMResult
 from langchain_core.runnables import Runnable
 from loguru import logger
 
+from open_notebook.ai.model_metadata import get_model_metadata
 from open_notebook.ai.models import ModelType, model_manager
 from open_notebook.ai.pricing import compute_cost, lookup_price
 from open_notebook.exceptions import ConfigurationError
@@ -120,6 +122,19 @@ class UsageTrackingCallbackHandler(AsyncCallbackHandler):
     Cost: `lookup_price()` resolves known / free / unknown. Unknown prices
     are stored with no cost (estimated_cost_usd absent) and cost_status
     'unknown' - never as a fake $0.
+
+    Idempotency: one handler instance is bound to exactly one model
+    invocation attempt (see `_attach_usage_tracking()` - a fresh handler,
+    with a fresh `attempt_id`, is created and attached per model per call to
+    `provision_langchain_model()`; nothing is ever reused across calls or
+    across the fallback chain). `_record()` additionally guards against the
+    SAME handler instance firing twice for the SAME completed response (e.g.
+    if a future change ever caused `on_llm_end`/`on_llm_error` to both be
+    invoked, or a handler ended up registered twice on one model) by only
+    ever writing once per instance. This is distinct from a genuine retry: a
+    retried call that actually reaches the provider again runs through its
+    own `provision_langchain_model()` invocation and therefore gets its own
+    handler/attempt_id/event - real re-attempts are never under-counted.
     """
 
     def __init__(
@@ -133,6 +148,8 @@ class UsageTrackingCallbackHandler(AsyncCallbackHandler):
         self.model_name = model_name
         self.task_type = task_type
         self.base_url = base_url
+        self.attempt_id = uuid.uuid4().hex
+        self._recorded = False
 
     async def _record(
         self,
@@ -142,6 +159,17 @@ class UsageTrackingCallbackHandler(AsyncCallbackHandler):
         failed: bool = False,
         error_type: Optional[str] = None,
     ) -> None:
+        if self._recorded:
+            # This handler instance already wrote its one event for this
+            # attempt - never write a second one for the same completed/
+            # failed response. See the class docstring.
+            logger.warning(
+                f"UsageTrackingCallbackHandler.{('on_llm_error' if failed else 'on_llm_end')} "
+                f"fired again for attempt {self.attempt_id} "
+                f"({self.provider}/{self.model_name}); skipping duplicate usage_event write."
+            )
+            return
+        self._recorded = True
         try:
             # Imported lazily to avoid a module-load-time dependency from
             # open_notebook.ai (imported very early, e.g. by the worker) on
@@ -180,6 +208,7 @@ class UsageTrackingCallbackHandler(AsyncCallbackHandler):
                 pricing_version=version,
                 failed=failed,
                 error_type=error_type,
+                attempt_id=self.attempt_id,
             )
             await event.save()
         except Exception as e:
@@ -233,6 +262,38 @@ def _attach_usage_tracking(
     except Exception as e:
         logger.warning(f"Failed to attach usage tracking callback: {e}")
     return lc_model
+
+
+async def _check_context_window(provider: str, model_name: str, tokens: int) -> None:
+    """Pre-flight content-size vs context-window check (compatibility item #2).
+
+    Honest by construction: `open_notebook.ai.model_metadata` only reports a
+    `context_window` when it actually has one (today: OpenRouter's catalog,
+    or a user-configured Ollama/oMLX `num_ctx`). For every other provider
+    this is a no-op - we never fabricate a window to "protect" against,
+    which would risk false positives (blocking a model that would have
+    worked fine) as much as false negatives. When the window IS known and
+    the content is close to or over it, raise before spending a paid call
+    that the provider would likely reject or truncate, rather than letting
+    that happen silently downstream.
+    """
+    try:
+        metadata = await get_model_metadata(provider, model_name)
+    except Exception as e:
+        logger.warning(f"Context window check failed for {provider}/{model_name}: {e}")
+        return
+    if metadata.context_window is None:
+        return
+    # 90% headroom: the raw content token count doesn't include the system
+    # prompt or reserved output tokens.
+    safe_limit = int(metadata.context_window * 0.9)
+    if tokens > safe_limit:
+        raise ConfigurationError(
+            f"This content is about {tokens} tokens, close to or over "
+            f"{provider}/{model_name}'s {metadata.context_window}-token context "
+            f"window. Choose a model with a larger context window, or use a "
+            f"smaller selection."
+        )
 
 
 async def provision_langchain_model(
@@ -299,6 +360,8 @@ async def provision_langchain_model(
 
     provider = model.provider
     model_name = model.get_model_name()
+
+    await _check_context_window(provider, model_name, tokens)
 
     lc_model = model.to_langchain()
     lc_model = _attach_usage_tracking(lc_model, provider, model_name, default_type)

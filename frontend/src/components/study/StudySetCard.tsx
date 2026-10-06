@@ -99,9 +99,22 @@ export function StudySetCard({ studySet, notebookName, onDelete, deleting }: Stu
                   {t('study.deleteSetDesc', { name: studySet.name })}
                 </AlertDialogDescription>
               </AlertDialogHeader>
+              {/* Name the exact scope being destroyed - reuses the existing
+                  itemsCount/dueCount keys already shown on the card above,
+                  so no new i18n placeholders are needed here. */}
+              <p className="text-sm text-muted-foreground">
+                {t('study.itemsCount', { count: studySet.item_count })}
+                {(studySet.due_count ?? 0) > 0
+                  ? ` • ${t('study.dueCount', { count: studySet.due_count })}`
+                  : ''}
+              </p>
               <AlertDialogFooter>
                 <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-                <AlertDialogAction onClick={() => onDelete(studySet.id)} disabled={deleting}>
+                <AlertDialogAction
+                  onClick={() => onDelete(studySet.id)}
+                  disabled={deleting}
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                >
                   {t('study.deleteSet')}
                 </AlertDialogAction>
               </AlertDialogFooter>

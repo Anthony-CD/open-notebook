@@ -18,6 +18,8 @@ import { NotebookDeleteDialog } from './NotebookDeleteDialog'
 import { useState } from 'react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getDateLocale } from '@/lib/utils/date-locale'
+import { cn } from '@/lib/utils'
+import { densityClass, usePreferencesStore } from '@/lib/stores/preferences-store'
 
 interface NotebookRowProps {
   notebook: NotebookResponse
@@ -28,6 +30,7 @@ export function NotebookRow({ notebook }: NotebookRowProps) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const router = useRouter()
   const updateNotebook = useUpdateNotebook()
+  const density = usePreferencesStore((state) => state.density)
 
   const handleArchiveToggle = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -47,7 +50,10 @@ export function NotebookRow({ notebook }: NotebookRowProps) {
           the accessible primary action (a real link) for keyboard/screen-reader
           users — avoiding nested interactive (button-in-button) semantics. */}
       <div
-        className="group flex items-center gap-4 rounded-lg border bg-card px-4 py-3 card-hover"
+        className={cn(
+          'group flex items-center gap-4 rounded-lg border bg-card card-hover',
+          densityClass(density, 'px-4 py-3', 'px-3 py-1.5')
+        )}
         onClick={handleRowClick}
         style={{ cursor: 'pointer' }}
       >

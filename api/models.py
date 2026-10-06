@@ -129,6 +129,30 @@ class ModelResponse(BaseModel):
     created: str
     updated: str
 
+    # Honest, best-effort metadata (P2 "Modelos, costo y confianza") - see
+    # open_notebook/ai/model_metadata.py. context_window/capabilities are
+    # None/[] when genuinely not known (most direct-provider models today),
+    # never a fabricated guess. There is deliberately no "speed" field: no
+    # provider or library in this codebase reports latency/throughput, so a
+    # fast/standard/slow label would be invented, not measured.
+    context_window: Optional[int] = Field(
+        None, description="Token context window, when known (e.g. OpenRouter catalog)"
+    )
+    capabilities: List[str] = Field(
+        default_factory=list,
+        description="Known capability flags, e.g. ['vision', 'tools']. Empty when unknown.",
+    )
+    capabilities_known: bool = Field(
+        False,
+        description=(
+            "Whether `capabilities` reflects real catalog data. False means "
+            "'not tracked for this provider', not 'confirmed no capabilities'."
+        ),
+    )
+    metadata_source: Optional[str] = Field(
+        None, description="Where context_window/capabilities came from, e.g. 'openrouter-catalog'"
+    )
+
 
 class DefaultModelsResponse(BaseModel):
     default_chat_model: Optional[str] = None
@@ -1084,6 +1108,63 @@ class UsageSummaryResponse(BaseModel):
     )
 
 
+# Budget API models (P2 "Modelos, costo y confianza")
+class BudgetPeriodStatus(BaseModel):
+    limit_usd: Optional[float] = Field(
+        None, description="Configured limit for this period; None = no cap"
+    )
+    spent_usd: float = Field(..., description="Known-cost spend so far this period")
+    remaining_usd: Optional[float] = Field(
+        None, description="limit_usd - spent_usd; None when no limit is configured"
+    )
+    is_over: bool = Field(..., description="Whether spend already reached/passed the limit")
+
+
+class BudgetStatusResponse(BaseModel):
+    daily_budget_usd: Optional[float] = Field(
+        None, description="User-configured daily limit (None = not configured)"
+    )
+    monthly_budget_usd_configured: Optional[float] = Field(
+        None,
+        description=(
+            "User-configured monthly limit (None = falling back to the "
+            "STUDY_BUDGET_USD environment variable)"
+        ),
+    )
+    daily: BudgetPeriodStatus
+    monthly: BudgetPeriodStatus
+
+
+class BudgetSettingsUpdate(BaseModel):
+    daily_budget_usd: Optional[float] = Field(
+        None, description="New daily limit in USD; omit/null clears it (no daily cap)"
+    )
+    monthly_budget_usd: Optional[float] = Field(
+        None,
+        description=(
+            "New monthly limit in USD; omit/null falls back to STUDY_BUDGET_USD"
+        ),
+    )
+
+
+class BudgetCheckRequest(BaseModel):
+    estimated_cost_usd: float = Field(
+        ..., ge=0, description="Estimated cost of the operation about to run"
+    )
+
+
+class BudgetCheckResponse(BaseModel):
+    estimated_cost_usd: float
+    would_exceed_daily: bool = Field(
+        ..., description="Whether spent_usd + estimated_cost_usd would pass the daily limit"
+    )
+    would_exceed_monthly: bool = Field(
+        ..., description="Whether spent_usd + estimated_cost_usd would pass the monthly limit"
+    )
+    daily: BudgetPeriodStatus
+    monthly: BudgetPeriodStatus
+
+
 # Study Tools API models (flashcards + quiz generation)
 class GenerateFlashcardsRequest(BaseModel):
     notebook_id: str = Field(..., description="Notebook to generate flashcards from")
@@ -1324,3 +1405,78 @@ class DriveImportRequest(BaseModel):
     notebook_id: str = Field(
         ..., description="Notebook ID to add the imported source to"
     )
+
+
+# =============================================================================
+# Audit log / activity history (P2 "Seguridad")
+# =============================================================================
+
+
+class ActivityItemResponse(BaseModel):
+    """A single audit log entry. `action` is a canonical code (e.g.
+    "notebook_deleted") the frontend translates to a sentence - never shown
+    raw. `detail` is short, non-sensitive context; never secret values or
+    full content of what was acted on."""
+
+    id: str
+    action: str
+    detail: Optional[str] = None
+    created: str
+
+
+class ActivityListResponse(BaseModel):
+    """Response for GET /api/activity."""
+
+    items: List[ActivityItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+# =============================================================================
+# Privacy center (P2 "Seguridad") - export / delete all data
+# =============================================================================
+
+
+class PrivacyExportResponse(BaseModel):
+    """Response for GET /api/privacy/export.
+
+    A JSON snapshot of this instance's content metadata - notebooks,
+    sources, notes, chat sessions, study sets, podcast episodes, and
+    credential/Drive-connection *metadata only* (never secret values).
+    Large binary blobs (uploaded files, podcast audio) are NOT inlined -
+    each source/episode entry carries its on-disk file_path/audio_file
+    reference instead, documented in `note`.
+    """
+
+    generated_at: str
+    note: str
+    notebooks: List[Dict[str, Any]]
+    sources: List[Dict[str, Any]]
+    notes: List[Dict[str, Any]]
+    chat_sessions: List[Dict[str, Any]]
+    study_sets: List[Dict[str, Any]]
+    episodes: List[Dict[str, Any]]
+    credentials: List[Dict[str, Any]]
+    drive_connection: Optional[Dict[str, Any]] = None
+
+
+class PrivacyDeleteRequest(BaseModel):
+    """Request body for DELETE /api/privacy/data.
+
+    `confirm` must exactly equal the literal phrase the frontend shows the
+    user in the destructive-confirmation dialog - a lightweight
+    double-confirmation that this isn't a misclick, on top of the UI's own
+    confirm dialog.
+    """
+
+    confirm: str = Field(
+        ..., description='Must be exactly "DELETE ALL MY DATA"'
+    )
+
+
+class PrivacyDeleteResponse(BaseModel):
+    """Response for DELETE /api/privacy/data: counts of what was removed."""
+
+    message: str
+    deleted: Dict[str, int]

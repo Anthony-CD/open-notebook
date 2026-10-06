@@ -27,7 +27,7 @@ export function LanguageToggle({ iconOnly = false }: LanguageToggleProps) {
           variant={iconOnly ? "ghost" : "outline"}
           aria-label={iconOnly ? t('navigation.language') : undefined}
           size={iconOnly ? "icon" : "default"} 
-          className={iconOnly ? "h-9 w-full sidebar-menu-item" : "w-full justify-start gap-2 sidebar-menu-item"}
+          className={iconOnly ? "h-11 w-11 sidebar-menu-item" : "w-full justify-start gap-2 sidebar-menu-item"}
         >
           <Languages className="h-[1.2rem] w-[1.2rem]" />
           {/* One accessible name only: the visible label when expanded, an

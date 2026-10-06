@@ -18,6 +18,7 @@ from loguru import logger
 from pydantic import ValidationError
 from surreal_commands import execute_command_sync, submit_command
 
+from api.audit_service import ACTION_SOURCE_DELETED, record_audit_event
 from api.command_service import CommandService
 from api.credentials_service import validate_url
 from api.middleware import get_max_upload_size_bytes
@@ -1409,7 +1410,9 @@ async def delete_source(source_id: str):
         if not source:
             raise HTTPException(status_code=404, detail="Source not found")
 
+        source_title = source.title
         await source.delete()
+        await record_audit_event(ACTION_SOURCE_DELETED, detail=source_title)
 
         return {"message": "Source deleted successfully"}
     except HTTPException:

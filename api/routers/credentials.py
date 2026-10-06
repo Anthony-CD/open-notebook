@@ -24,6 +24,11 @@ from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 from pydantic import SecretStr
 
+from api.audit_service import (
+    ACTION_CREDENTIAL_CREATED,
+    ACTION_CREDENTIAL_DELETED,
+    record_audit_event,
+)
 from api.credentials_service import (
     credential_to_response,
     discover_with_config,
@@ -196,6 +201,9 @@ async def create_credential(request: CreateCredentialRequest):
             num_ctx=request.num_ctx,
         )
         await cred.save()
+        await record_audit_event(
+            ACTION_CREDENTIAL_CREATED, detail=f"{request.provider}: {request.name}"
+        )
         return credential_to_response(cred, 0)
 
     except HTTPException:
@@ -361,6 +369,9 @@ async def delete_credential(
 
             # Delete the credential itself
             await repo_delete(credential_id)
+            await record_audit_event(
+                ACTION_CREDENTIAL_DELETED, detail=f"{credential_id} (undecryptable)"
+            )
 
             return CredentialDeleteResponse(
                 message="Credential deleted successfully",
@@ -386,6 +397,9 @@ async def delete_credential(
 
         # Delete the credential
         await cred.delete()
+        await record_audit_event(
+            ACTION_CREDENTIAL_DELETED, detail=f"{cred.provider}: {cred.name}"
+        )
 
         return CredentialDeleteResponse(
             message="Credential deleted successfully",

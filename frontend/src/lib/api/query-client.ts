@@ -43,4 +43,6 @@ export const QUERY_KEYS = {
   commandJob: (jobId: string) => ['commands', 'job', jobId] as const,
   driveStatus: ['drive', 'status'] as const,
   driveFiles: (query: string, pageToken?: string) => ['drive', 'files', query, pageToken ?? ''] as const,
+  activity: (action: string | undefined, limit: number, offset: number) =>
+    ['activity', action ?? 'all', limit, offset] as const,
 }

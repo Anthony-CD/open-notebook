@@ -92,9 +92,23 @@ export function isJobCancelable(raw: unknown): boolean {
   return normalizeJobStatus(raw) === 'queued'
 }
 
+// Written as a literal lookup (not a template string) so each full key -
+// e.g. "jobStatus.queued" - appears verbatim in this file. The locale
+// unused-key test (src/lib/locales/index.test.ts) greps source files for
+// the literal key text, which a `jobStatus.${status}` template would never
+// satisfy.
+const JOB_STATUS_LABEL_KEYS: Record<JobStatus, `jobStatus.${JobStatus}`> = {
+  queued: 'jobStatus.queued',
+  processing: 'jobStatus.processing',
+  completed: 'jobStatus.completed',
+  failed: 'jobStatus.failed',
+  canceled: 'jobStatus.canceled',
+  unknown: 'jobStatus.unknown',
+}
+
 /** i18n key of the human label for a status (`jobStatus.*` in every locale). */
 export function jobStatusLabelKey(raw: unknown): `jobStatus.${JobStatus}` {
-  return `jobStatus.${normalizeJobStatus(raw)}`
+  return JOB_STATUS_LABEL_KEYS[normalizeJobStatus(raw)]
 }
 
 /**

@@ -3,6 +3,7 @@
 import { Suspense } from 'react'
 import { AppShell } from '@/components/layout/AppShell'
 import { SettingsForm } from './components/SettingsForm'
+import { PreferencesCard } from './components/PreferencesCard'
 import { useSettings } from '@/lib/hooks/use-settings'
 import { Button } from '@/components/ui/button'
 import { RefreshCw } from 'lucide-react'
@@ -47,6 +48,10 @@ export default function SettingsPage() {
               <Suspense fallback={<CardSkeleton />}>
                 <DriveConnectionCard />
               </Suspense>
+            </div>
+
+            <div className="mb-6">
+              <PreferencesCard />
             </div>
 
             <SettingsForm />

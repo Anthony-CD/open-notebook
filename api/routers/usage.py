@@ -3,9 +3,20 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
-from api.models import UsageSummaryResponse
-from api.usage_service import get_usage_summary
-from open_notebook.exceptions import OpenNotebookError
+from api.models import (
+    BudgetCheckRequest,
+    BudgetCheckResponse,
+    BudgetSettingsUpdate,
+    BudgetStatusResponse,
+    UsageSummaryResponse,
+)
+from api.usage_service import (
+    check_expensive_operation,
+    get_budget_settings_and_status,
+    get_usage_summary,
+    update_budget_settings,
+)
+from open_notebook.exceptions import InvalidInputError, OpenNotebookError
 
 router = APIRouter()
 
@@ -43,3 +54,53 @@ async def usage_summary(
     except Exception as e:
         logger.error(f"Error fetching usage summary: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch usage summary")
+
+
+@router.get("/usage/budget", response_model=BudgetStatusResponse)
+async def usage_budget():
+    """Configured daily/monthly budgets and current known spend vs each."""
+    try:
+        return BudgetStatusResponse(**await get_budget_settings_and_status())
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching budget status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch budget status")
+
+
+@router.put("/usage/budget", response_model=BudgetStatusResponse)
+async def update_usage_budget(payload: BudgetSettingsUpdate):
+    """Update the user-configured daily/monthly LLM spend limits."""
+    try:
+        return BudgetStatusResponse(
+            **await update_budget_settings(
+                daily_budget_usd=payload.daily_budget_usd,
+                monthly_budget_usd=payload.monthly_budget_usd,
+            )
+        )
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating budget settings: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update budget settings")
+
+
+@router.post("/usage/budget/check", response_model=BudgetCheckResponse)
+async def check_usage_budget(payload: BudgetCheckRequest):
+    """Pre-expensive-operation check: estimate vs remaining daily/monthly budget.
+
+    Never blocks by itself - always 200s with the estimate and current
+    status so the caller can decide whether to confirm with the user before
+    running a costly operation (podcast generation, a large transformation,
+    study-set generation on a huge notebook).
+    """
+    try:
+        result = await check_expensive_operation(payload.estimated_cost_usd)
+        return BudgetCheckResponse(**result)
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking budget for operation: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to check budget")

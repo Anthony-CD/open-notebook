@@ -3,6 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 
+from api.audit_service import ACTION_NOTEBOOK_DELETED, record_audit_event
 from api.models import (
     NotebookCreate,
     NotebookDeletePreview,
@@ -435,10 +436,12 @@ async def delete_notebook(
     """
     try:
         notebook = await Notebook.get(notebook_id)
+        notebook_name = notebook.name
 
         result = await notebook.delete(
             delete_exclusive_sources=delete_exclusive_sources
         )
+        await record_audit_event(ACTION_NOTEBOOK_DELETED, detail=notebook_name)
 
         return NotebookDeleteResponse(
             message="Notebook deleted successfully",

@@ -12,6 +12,12 @@ from loguru import logger
 from surrealdb import RecordID
 
 from open_notebook.ai.connection_tester import normalize_anthropic_compatible_base_url
+from open_notebook.ai.mock_provider import (
+    MOCK_PROVIDER_ENV_VAR,
+    MOCK_PROVIDER_NAME,
+    build_mock_language_model,
+    mock_provider_enabled,
+)
 from open_notebook.ai.pricing import get_price_per_token
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel, RecordModel
@@ -244,6 +250,24 @@ class ModelManager:
             "text_to_speech",
         ]:
             raise ConfigurationError(f"Invalid model type: {model.type}")
+
+        # Dev-only mock provider for manual QA (never spends real tokens).
+        # Hard-gated behind an env var so a leftover "mock" Model row from a
+        # QA session can never silently serve real traffic - see
+        # open_notebook/ai/mock_provider.py.
+        if model.provider == MOCK_PROVIDER_NAME:
+            if model.type != "language":
+                raise ConfigurationError(
+                    "The mock provider only supports language models."
+                )
+            if not mock_provider_enabled():
+                raise ConfigurationError(
+                    f"Model '{model.name}' uses the mock provider, but "
+                    f"{MOCK_PROVIDER_ENV_VAR} is not set. Enable it for local "
+                    f"QA (dev-only; never enable in production) or point this "
+                    f"model slot at a real provider."
+                )
+            return build_mock_language_model(model.name)
 
         # Build config from credential if linked, otherwise fall back to env vars
         config: dict = {}

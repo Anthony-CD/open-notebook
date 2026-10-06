@@ -1,9 +1,15 @@
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from open_notebook.ai.pricing import STATIC_PRICE_TABLE
-from open_notebook.domain.usage import UsageEvent, aggregate_events
+from open_notebook.domain.content_settings import ContentSettings
+from open_notebook.domain.usage import (
+    UsageEvent,
+    aggregate_events,
+    check_operation_against_budget,
+    get_budget_status,
+)
 from open_notebook.exceptions import InvalidInputError
 
 DEFAULT_STUDY_BUDGET_USD = 10.0
@@ -87,3 +93,41 @@ async def get_usage_summary(
         },
         "pricing_table_version": STATIC_PRICE_TABLE["version"],
     }
+
+
+async def get_budget_settings_and_status() -> Dict[str, Any]:
+    """Configured daily/monthly budgets plus current spend vs each (P2 item 3)."""
+    settings: ContentSettings = await ContentSettings.get_instance()  # type: ignore[assignment]
+    status = await get_budget_status()
+    return {
+        "daily_budget_usd": settings.daily_budget_usd,
+        "monthly_budget_usd_configured": settings.monthly_budget_usd,
+        **status,
+    }
+
+
+async def update_budget_settings(
+    daily_budget_usd: Optional[float], monthly_budget_usd: Optional[float]
+) -> Dict[str, Any]:
+    """Persist user-configured daily/monthly budgets and return the new status.
+
+    `None` for either field clears that limit (daily: no cap; monthly: fall
+    back to STUDY_BUDGET_USD). A negative value is rejected - a limit of $0
+    is allowed (effectively "pause all paid spend").
+    """
+    if daily_budget_usd is not None and daily_budget_usd < 0:
+        raise InvalidInputError("daily_budget_usd must not be negative")
+    if monthly_budget_usd is not None and monthly_budget_usd < 0:
+        raise InvalidInputError("monthly_budget_usd must not be negative")
+
+    settings: ContentSettings = await ContentSettings.get_instance()  # type: ignore[assignment]
+    settings.daily_budget_usd = daily_budget_usd
+    settings.monthly_budget_usd = monthly_budget_usd
+    await settings.update()
+
+    return await get_budget_settings_and_status()
+
+
+async def check_expensive_operation(estimated_cost_usd: float) -> Dict[str, Any]:
+    """Pre-operation budget check: estimate vs remaining daily/monthly budget."""
+    return await check_operation_against_budget(estimated_cost_usd)

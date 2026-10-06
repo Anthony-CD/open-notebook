@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from api.auth import PasswordAuthMiddleware
 from api.middleware import MaxBodySizeMiddleware, get_max_upload_size_bytes
 from api.routers import (
+    activity,
     auth,
     capabilities,
     chat,
@@ -38,6 +39,7 @@ from api.routers import (
     notebooks,
     notes,
     podcasts,
+    privacy,
     providers,
     search,
     settings,
@@ -415,6 +417,8 @@ app.include_router(languages.router, prefix="/api", tags=["languages"])
 app.include_router(study.router, prefix="/api", tags=["study"])
 app.include_router(usage.router, prefix="/api", tags=["usage"])
 app.include_router(drive.router, prefix="/api", tags=["drive"])
+app.include_router(activity.router, prefix="/api", tags=["activity"])
+app.include_router(privacy.router, prefix="/api", tags=["privacy"])
 
 
 @app.get("/")

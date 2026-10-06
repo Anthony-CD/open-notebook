@@ -1,0 +1,3 @@
+-- Down migration 33: drop the usage_event attempt_id idempotency key.
+
+REMOVE FIELD IF EXISTS attempt_id ON TABLE usage_event;

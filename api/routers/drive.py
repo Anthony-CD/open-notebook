@@ -17,6 +17,11 @@ from fastapi.responses import RedirectResponse
 from loguru import logger
 
 from api import drive_service
+from api.audit_service import (
+    ACTION_DRIVE_CONNECTED,
+    ACTION_DRIVE_DISCONNECTED,
+    record_audit_event,
+)
 from api.models import (
     DriveAuthUrlResponse,
     DriveDisconnectResponse,
@@ -87,6 +92,7 @@ async def oauth_callback(
                 {"drive": "error", "message": "Unexpected error while saving the connection"}
             )
         )
+    await record_audit_event(ACTION_DRIVE_CONNECTED)
     return RedirectResponse(url=drive_service.frontend_settings_url({"drive": "connected"}))
 
 
@@ -99,6 +105,7 @@ async def get_status():
 @router.delete("/drive/disconnect", response_model=DriveDisconnectResponse)
 async def disconnect():
     await drive_service.disconnect()
+    await record_audit_event(ACTION_DRIVE_DISCONNECTED)
     return DriveDisconnectResponse(message="Google Drive disconnected")
 
 

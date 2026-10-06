@@ -45,3 +45,25 @@ class ContentSettings(RecordModel):
         ["en", "pt", "es", "de", "nl", "en-GB", "fr", "de", "hi", "ja"],
         description="Preferred languages for YouTube transcripts",
     )
+
+    # ------------------------------------------------------------------
+    # Budgets (P2 "Modelos, costo y confianza"). None means "not
+    # configured" - see open_notebook/domain/usage.py's get_budget_limits(),
+    # which falls the monthly figure back to the STUDY_BUDGET_USD env var
+    # (unchanged default behavior) when this is None, and treats a None
+    # daily limit as "no daily cap" (opt-in feature).
+    # ------------------------------------------------------------------
+    daily_budget_usd: Optional[float] = Field(
+        None,
+        description=(
+            "User-configured daily LLM spend limit in USD. None = no daily "
+            "cap configured (monthly budget still applies)."
+        ),
+    )
+    monthly_budget_usd: Optional[float] = Field(
+        None,
+        description=(
+            "User-configured monthly LLM spend limit in USD. None = fall "
+            "back to the STUDY_BUDGET_USD environment variable (default $10)."
+        ),
+    )

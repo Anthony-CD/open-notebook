@@ -18,6 +18,8 @@ import { NotebookDeleteDialog } from './NotebookDeleteDialog'
 import { useState } from 'react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getDateLocale } from '@/lib/utils/date-locale'
+import { cn } from '@/lib/utils'
+import { densityClass, usePreferencesStore } from '@/lib/stores/preferences-store'
 interface NotebookCardProps {
   notebook: NotebookResponse
 }
@@ -27,6 +29,7 @@ export function NotebookCard({ notebook }: NotebookCardProps) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const router = useRouter()
   const updateNotebook = useUpdateNotebook()
+  const density = usePreferencesStore((state) => state.density)
 
   const handleArchiveToggle = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -42,12 +45,12 @@ export function NotebookCard({ notebook }: NotebookCardProps) {
 
   return (
     <>
-      <Card 
-        className="group card-hover"
+      <Card
+        className={cn('group card-hover', densityClass(density, 'py-6', 'py-3'))}
         onClick={handleCardClick}
         style={{ cursor: 'pointer' }}
       >
-          <CardHeader className="pb-3">
+          <CardHeader className={densityClass(density, 'pb-3', 'py-3')}>
             <div className="flex items-start justify-between">
               <div className="flex-1 min-w-0">
                 <span aria-hidden className="mb-2 block h-2 w-2 rounded-[3px] bg-teal" />

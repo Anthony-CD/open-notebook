@@ -65,6 +65,15 @@ Comprehensive list of all environment variables available in Open Notebook.
 
 ---
 
+## Budgets & Dev-Only Mock Provider
+
+| Variable | Required? | Default | Description |
+|----------|-----------|---------|-------------|
+| `STUDY_BUDGET_USD` | No | 10.0 | Trailing-30-day known-cost spend ceiling used by the paid-fallback-model cutoff (`ModelManager.get_fallback_chain()`). Also the fallback when no monthly budget is configured in Settings → Usage (see `daily_budget_usd`/`monthly_budget_usd`, user-configurable per-day/per-month limits with a pre-operation confirmation before costly runs). |
+| `OPEN_NOTEBOOK_ENABLE_MOCK_PROVIDER` | No | unset (disabled) | Enables the dev-only mock LLM provider for manual QA without spending real tokens - see [Advanced Configuration → Mock Provider](advanced.md#mock-provider-manual-qa-without-spending-tokens). Never set this in production. |
+
+---
+
 ## Embeddings
 
 | Variable | Required? | Default | Description |

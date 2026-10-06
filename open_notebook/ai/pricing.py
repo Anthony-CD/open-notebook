@@ -79,7 +79,9 @@ STATIC_PRICE_TABLE: Dict[str, Any] = {
 }
 
 # Providers that run on the user's own hardware - no per-token billing.
-_LOCAL_FREE_PROVIDERS = {"ollama", "omlx"}
+# "mock" is the dev-only QA provider (open_notebook/ai/mock_provider.py):
+# it never calls a real API, so $0 is the honest known price.
+_LOCAL_FREE_PROVIDERS = {"ollama", "omlx", "mock"}
 # Hosts of explicitly free hosted endpoints (NVIDIA Developer Program).
 _FREE_ENDPOINT_HOSTS = {"integrate.api.nvidia.com"}
 

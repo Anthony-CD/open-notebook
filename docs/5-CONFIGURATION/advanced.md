@@ -370,6 +370,33 @@ env | grep OPEN_NOTEBOOK_ENCRYPTION_KEY
 python -c "import os; print(os.getenv('SURREAL_URL'))"
 ```
 
+### Mock Provider (Manual QA Without Spending Tokens)
+
+For clicking through chat, transformations, podcasts, etc. in a running app
+instance without calling a real paid provider, Open Notebook ships a
+dev-only mock LLM provider. It returns a canned response with fake token
+usage (so the Cost Meter and usage tracking still exercise their full code
+path) and is always reported as $0 cost.
+
+It is **off by default** and gated behind an environment variable so a
+leftover mock model can never accidentally serve real traffic:
+
+```bash
+# Enable the mock provider (dev/QA only - never set this in production)
+export OPEN_NOTEBOOK_ENABLE_MOCK_PROVIDER=true
+```
+
+With it set, register a model with provider `mock` (Settings → Models → Add
+Model; no credential needed) and point a default model slot (e.g. the
+default chat model) at it. Without the env var set, any model using
+provider `mock` fails closed with a clear `ConfigurationError` instead of
+silently doing nothing or falling through to a real provider.
+
+Unit tests do **not** need this - they already mock providers directly at
+the pricing/callback/repository layer (see `tests/conftest.py` and
+`tests/test_usage_cost_meter.py`). This is specifically for exercising the
+running app end-to-end.
+
 ---
 
 ## Troubleshooting Performance
