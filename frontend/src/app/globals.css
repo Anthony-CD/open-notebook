@@ -455,4 +455,18 @@
   .prose blockquote p::after {
     content: none !important;
   }
+
+  /* Sonner hardcodes z-index: 999999999 on its toaster container with no
+     prop to override it (see node_modules/sonner's injected stylesheet).
+     That sits far above this app's Radix dialogs (z-50, see ui/dialog.tsx),
+     so a toast positioned over a dialog's action buttons (the default
+     bottom-right position can land there) silently swallows clicks - the
+     user clicks "Done"/"Save"/etc., the toast intercepts the event, and
+     nothing happens with no visible error. Force toasts below dialogs/
+     overlays (z-50) so an open dialog always wins the stack; they stay
+     comfortably above ordinary page content otherwise. !important is
+     required to beat sonner's own injected rule regardless of DOM order. */
+  [data-sonner-toaster] {
+    z-index: 40 !important;
+  }
 }
