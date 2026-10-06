@@ -1,0 +1,24 @@
+-- Migration 32: Chat message feedback (P1 "Chat con citas")
+--
+-- NOTE: originally authored as migration 31, renumbered to 32 after a
+-- parallel agent claimed 31 first for podcast episode favorites/tags - see
+-- 31.surrealql.
+--
+-- Thumbs up/down rating per chat message. Chat/source-chat message history
+-- itself lives in the LangGraph SqliteSaver checkpoint (not SurrealDB), so
+-- there's no existing row to attach a rating to - this is a small standalone
+-- table keyed by (session_id, message_id) instead of a FK to a message row
+-- that doesn't exist in this database.
+--
+-- record id is a deterministic `<session>_<message>` key (built by
+-- api/routers/_chat_shared.py's set_feedback()) so re-rating the same
+-- message upserts the same row instead of accumulating duplicates.
+
+DEFINE TABLE IF NOT EXISTS chat_feedback SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE chat_feedback TYPE string;
+DEFINE FIELD IF NOT EXISTS message_id ON TABLE chat_feedback TYPE string;
+DEFINE FIELD IF NOT EXISTS rating ON TABLE chat_feedback TYPE string ASSERT $value IN ["up", "down"];
+DEFINE FIELD IF NOT EXISTS created ON TABLE chat_feedback TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated ON TABLE chat_feedback TYPE datetime DEFAULT time::now() VALUE time::now();
+
+DEFINE INDEX IF NOT EXISTS idx_chat_feedback_session ON TABLE chat_feedback COLUMNS session_id CONCURRENTLY;

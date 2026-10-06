@@ -4,10 +4,19 @@ import React from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
+import i18n from '@/lib/i18n'
 import { enUS } from '@/lib/locales/en-US'
 
-// Use English as fallback for ErrorBoundary (class component cannot use hooks)
-const t = enUS
+// Class components can't use hooks, so translate through the i18n instance
+// directly. If i18n itself is what broke, fall back to the raw en-US strings.
+function tr(key: string, fallback: string): string {
+  try {
+    const value = i18n.t(key)
+    return value && value !== key ? value : fallback
+  } catch {
+    return fallback
+  }
+}
 
 interface ErrorBoundaryState {
   hasError: boolean
@@ -59,15 +68,15 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
               <div className="mx-auto w-12 h-12 rounded-full bg-destructive-tint flex items-center justify-center mb-4">
                 <AlertTriangle className="w-6 h-6 text-destructive" />
               </div>
-              <CardTitle className="text-destructive">{t?.common?.error || 'Something went wrong'}</CardTitle>
+              <CardTitle className="text-destructive">{tr('common.error', enUS.common.error)}</CardTitle>
               <CardDescription>
-                {t?.common?.refreshPage || 'An unexpected error occurred. Please try refreshing the page.'}
+                {tr('common.refreshPage', enUS.common.refreshPage)}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               {process.env.NODE_ENV === 'development' && this.state.error && (
                 <details className="text-xs bg-muted p-3 rounded border">
-                  <summary className="cursor-pointer font-medium">{t?.common?.errorDetails || 'Error Details'}</summary>
+                  <summary className="cursor-pointer font-medium">{tr('common.errorDetails', enUS.common.errorDetails)}</summary>
                   <pre className="mt-2 whitespace-pre-wrap break-all">
                     {this.state.error.toString()}
                   </pre>
@@ -79,13 +88,13 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                 variant="outline"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
-                {t?.common?.retry || 'Try Again'}
+                {tr('common.retry', enUS.common.retry)}
               </Button>
               <Button 
                 onClick={() => window.location.reload()} 
                 className="w-full"
               >
-                {t?.common?.refresh || 'Refresh Page'}
+                {tr('common.refresh', enUS.common.refresh)}
               </Button>
             </CardContent>
           </Card>

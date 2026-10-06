@@ -36,14 +36,41 @@ export interface SourceListResponse {
   command_id?: string
   status?: string
   processing_info?: Record<string, unknown>
+  // Archive flag (mirrors NotebookResponse.archived) - see migration 30
+  archived?: boolean
+  // Set when another source in one of this source's notebooks shares the
+  // same content hash. A UX hint, not a hard block.
+  duplicate_of?: string | null
 }
 
 export interface SourceDetailResponse extends SourceListResponse {
   full_text: string
   notebooks?: string[]  // List of notebook IDs this source is linked to
+  duplicate_of_title?: string | null
 }
 
 export type SourceResponse = SourceDetailResponse
+
+export interface SourceDeletePreview {
+  source_id: string
+  chunk_count: number
+  insight_count: number
+  chat_session_count: number
+  notebook_count: number
+}
+
+export interface SourceUploadLimits {
+  max_upload_size_bytes: number
+  max_upload_size_mb: number
+}
+
+export interface DuplicateSourceDetail {
+  message: string
+  duplicate: true
+  existing_source_id: string
+  existing_source_title: string | null
+  existing_source_created: string
+}
 
 export interface SourceStatusResponse {
   status?: string
@@ -118,6 +145,8 @@ export interface CreateSourceRequest {
   delete_source?: boolean
   // New async processing support
   async_processing?: boolean
+  // Resubmit after a 409 duplicate warning once the user confirms "add anyway"
+  force_duplicate?: boolean
 }
 
 export interface UpdateNoteRequest {
@@ -153,17 +182,38 @@ export interface SourceChatSession extends BaseChatSession {
   model_override?: string
 }
 
+// A structured citation backing a `[n]` marker in a chat/ask answer. Built
+// backend-side from what was actually retrieved (api.models.Citation) -
+// never derived from the raw answer text, so the chip the frontend renders
+// is never a guess. `location` is null when the source type doesn't carry
+// anything more precise than "the whole document" (e.g. a full source or
+// note - there's no page/chunk tracking for those today).
+export interface Citation {
+  number: number
+  ref_type: 'source' | 'source_insight' | 'note'
+  ref_id: string
+  title: string
+  location: string | null
+  snippet: string
+}
+
 export interface SourceChatMessage {
   id: string
   type: 'human' | 'ai'
   content: string
   timestamp?: string
+  citations?: Citation[] | null
+  feedback?: 'up' | 'down' | null
 }
 
 export interface SourceChatContextIndicator {
   sources: string[]
   insights: string[]
   notes: string[]
+}
+
+export interface MessageFeedbackRequest {
+  rating: 'up' | 'down' | null
 }
 
 export interface SourceChatSessionWithMessages extends SourceChatSession {
@@ -205,6 +255,8 @@ export interface NotebookChatMessage {
   type: 'human' | 'ai'
   content: string
   timestamp?: string
+  citations?: Citation[] | null
+  feedback?: 'up' | 'down' | null
 }
 
 export interface NotebookChatSessionWithMessages extends NotebookChatSession {

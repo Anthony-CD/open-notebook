@@ -9,9 +9,12 @@ from pydantic import BaseModel, Field
 
 from api.routers._chat_shared import (
     ChatMessage,
+    FeedbackRequest,
     SuccessResponse,
     extract_chat_messages,
+    get_feedback_map,
     get_session_or_404,
+    set_feedback,
 )
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import ChatSession, Notebook
@@ -193,10 +196,14 @@ async def get_session(session_id: str):
             config=RunnableConfig(configurable={"thread_id": full_session_id}),
         )
 
-        # Extract messages from state
+        # Extract messages from state, merging in any stored thumbs up/down
+        # ratings so reopening the session still shows them.
         messages: list[ChatMessage] = []
         if thread_state and thread_state.values and "messages" in thread_state.values:
-            messages = extract_chat_messages(thread_state.values["messages"])
+            feedback_map = await get_feedback_map(full_session_id)
+            messages = extract_chat_messages(
+                thread_state.values["messages"], feedback_map
+            )
 
         # Find notebook_id (we need to query the relationship)
         notebook_query = await repo_query(
@@ -368,7 +375,8 @@ async def execute_chat(request: ExecuteChatRequest):
         await session.save()
 
         # Convert messages to response format
-        messages = extract_chat_messages(result.get("messages", []))
+        feedback_map = await get_feedback_map(full_session_id)
+        messages = extract_chat_messages(result.get("messages", []), feedback_map)
 
         return ExecuteChatResponse(session_id=request.session_id, messages=messages)
     except NotFoundError:
@@ -414,3 +422,33 @@ async def build_context(request: BuildContextRequest):
     except Exception as e:
         logger.error(f"Error building context: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error building context: {str(e)}")
+
+
+@router.put(
+    "/chat/sessions/{session_id}/messages/{message_id}/feedback",
+    response_model=SuccessResponse,
+)
+async def set_message_feedback(
+    session_id: str, message_id: str, request: FeedbackRequest
+):
+    """Set (or clear, with `rating: null`) a thumbs up/down rating for a message.
+
+    A lightweight stored rating - see the `chat_feedback` table (migration
+    32) - not a full analytics pipeline. Doesn't verify the message id
+    actually exists in this session's LangGraph state; the id comes from a
+    message this same session already returned, so this intentionally
+    trusts the caller rather than re-walking the full checkpoint for it.
+    """
+    try:
+        full_session_id, _session = await get_session_or_404(session_id)
+        await set_feedback(full_session_id, message_id, request.rating)
+        return SuccessResponse(success=True, message="Feedback saved")
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving message feedback: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error saving feedback: {str(e)}")

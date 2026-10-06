@@ -26,9 +26,19 @@ Normative rules for working on the Next.js frontend. Architecture and flow walkt
 - Cache invalidation is deliberately broad (e.g. `['sources']` hits all source queries) — a simplicity/perf trade-off, be precise only when it matters.
 - Dark mode requires the `dark` class on the document root, not just `prefers-color-scheme`. It's hand-rolled: the zustand `theme-store` (persisted as `theme-storage`) sets the class via `ThemeProvider` — no next-themes.
 - Dialogs don't auto-reset form state (parent clears it) and auto-focus the first input (layout shift risk with conditional inputs). Fixed overlays use `z-50`.
-- Provider nesting order in `app/layout.tsx` matters: ErrorBoundary → ThemeProvider → QueryProvider → I18nProvider → ConnectionGuard → Toaster. ErrorBoundary is a class component and uses the raw `enUS` locale object (no hooks).
+- Provider nesting order in `app/layout.tsx` matters: ErrorBoundary → ThemeProvider → QueryProvider → I18nProvider → ConnectionGuard → Toaster. ErrorBoundary is a class component (no hooks): it translates via the `i18n` instance directly, falling back to the raw `enUS` strings. Route-level errors under `(dashboard)` are handled by `app/(dashboard)/error.tsx`; `app/global-error.tsx` covers the root layout.
 - `i18n` runs with `useSuspense: false` (no SSR for translations).
 
 ## Deep dives
 
 [frontend architecture](../docs/7-DEVELOPMENT/frontend.md) · [credentials system](../docs/7-DEVELOPMENT/credentials.md) · [change playbooks](../docs/7-DEVELOPMENT/change-playbooks.md) (i18n / frontend-only changes) · [code standards](../docs/7-DEVELOPMENT/code-standards.md)
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

@@ -11,10 +11,13 @@ from pydantic import BaseModel, Field
 
 from api.routers._chat_shared import (
     ChatMessage,
+    FeedbackRequest,
     SuccessResponse,
     extract_chat_messages,
+    get_feedback_map,
     get_source_or_404,
     get_verified_source_session,
+    set_feedback,
 )
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import ChatSession
@@ -211,9 +214,12 @@ async def get_source_chat_session(
         context_indicators = None
 
         if thread_state and thread_state.values:
-            # Extract messages
+            # Extract messages, merging in any stored thumbs up/down ratings.
             if "messages" in thread_state.values:
-                messages = extract_chat_messages(thread_state.values["messages"])
+                feedback_map = await get_feedback_map(full_session_id)
+                messages = extract_chat_messages(
+                    thread_state.values["messages"], feedback_map
+                )
 
             # Extract context indicators from the last state
             if "context_indicators" in thread_state.values:
@@ -451,3 +457,31 @@ async def send_message_to_source_chat(
     except Exception as e:
         logger.error(f"Error sending message to source chat: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error sending message: {str(e)}")
+
+
+@router.put(
+    "/sources/{source_id}/chat/sessions/{session_id}/messages/{message_id}/feedback",
+    response_model=SuccessResponse,
+)
+async def set_source_chat_message_feedback(
+    request: FeedbackRequest,
+    source_id: str = Path(..., description="Source ID"),
+    session_id: str = Path(..., description="Session ID"),
+    message_id: str = Path(..., description="Message ID"),
+):
+    """Set (or clear, with `rating: null`) a thumbs up/down rating for a message."""
+    try:
+        _full_source_id, _source, full_session_id, _session = (
+            await get_verified_source_session(source_id, session_id)
+        )
+        await set_feedback(full_session_id, message_id, request.rating)
+        return SuccessResponse(success=True, message="Feedback saved")
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Source or session not found")
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving source chat message feedback: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error saving feedback: {str(e)}")

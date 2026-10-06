@@ -1,0 +1,20 @@
+-- Migration 31: Favorites and tags for podcast episodes (P1 "Organizacion y busqueda")
+--
+-- Minimal, backward-compatible organization fields on the `episode` table
+-- (PodcastEpisode, open_notebook/podcasts/models.py). Scoped to episodes
+-- only - adding the same fields to notebook/source was intentionally left
+-- out of this change to avoid colliding with other agents editing
+-- open_notebook/domain/notebook.py in the same tree; see the podcasts/
+-- search P1 report for the extension path.
+--
+-- favorited: simple boolean star/favorite toggle, defaults to false for all
+--   existing rows (backfilled below, like migration 30's `archived`).
+-- tags: free-text tag list, defaults to an empty array - no fixed taxonomy.
+
+DEFINE FIELD IF NOT EXISTS favorited ON TABLE episode TYPE option<bool> DEFAULT false;
+DEFINE FIELD IF NOT EXISTS tags ON TABLE episode TYPE option<array<string>> DEFAULT [];
+
+-- Backfill existing rows (NONE -> default) so older episodes filter/sort
+-- the same way as new ones.
+UPDATE episode SET favorited = false WHERE favorited = NONE;
+UPDATE episode SET tags = [] WHERE tags = NONE;

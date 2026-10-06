@@ -6,6 +6,12 @@ export type EpisodeStatus =
   | 'error'
   | 'pending'
   | 'submitted'
+  // The backend's canonical job-status vocabulary (open_notebook/utils/
+  // job_status.py normalize_job_status) actually returns 'queued' and
+  // 'canceled' - included here so cancel/retry UI can match on the real
+  // values instead of only the legacy 'pending'/'submitted' aliases.
+  | 'queued'
+  | 'canceled'
   | 'unknown'
 
 export interface EpisodeProfile {
@@ -83,11 +89,44 @@ export interface PodcastEpisode {
   briefing: string
   audio_file?: string | null
   audio_url?: string | null
+  /** Size of the audio file on disk, in bytes - known before it's fetched (a stat(), not a read). */
+  audio_size_bytes?: number | null
   transcript?: Record<string, unknown> | null
   outline?: Record<string, unknown> | null
   created?: string | null
   job_status?: EpisodeStatus | null
   error_message?: string | null
+  /** surreal-commands job id backing this episode, when one exists - used to cancel a still-queued job. */
+  command_id?: string | null
+  favorited?: boolean
+  tags?: string[]
+  /** Notebook names recovered from the episode's stored content (best-effort, see api/routers/podcasts.py). */
+  content_notebooks?: string[]
+}
+
+export interface PodcastEpisodeOrganizationUpdate {
+  favorited?: boolean
+  tags?: string[]
+}
+
+/** One generation stage's best-effort cost estimate (GET /podcasts/estimate). */
+export interface PodcastStageEstimate {
+  role: 'outline' | 'transcript' | 'tts'
+  provider?: string | null
+  model_name?: string | null
+  cost_status: 'known' | 'free' | 'unknown'
+  estimated_cost_usd?: number | null
+  pricing_version?: string | null
+  configured: boolean
+}
+
+export interface PodcastGenerationEstimate {
+  outline: PodcastStageEstimate
+  transcript: PodcastStageEstimate
+  tts: PodcastStageEstimate
+  total_estimated_cost_usd?: number | null
+  is_complete: boolean
+  is_estimate: boolean
 }
 
 export interface PodcastGenerationRequest {
@@ -117,9 +156,19 @@ export const ACTIVE_EPISODE_STATUSES: EpisodeStatus[] = [
   'processing',
   'pending',
   'submitted',
+  'queued',
 ]
 
-export const FAILED_EPISODE_STATUSES: EpisodeStatus[] = ['failed', 'error']
+/** Jobs still waiting in the queue - the only ones the cancel endpoint can
+ * actually cancel (commands/commands.py / open_notebook/utils/job_status.py
+ * ACTIVE_JOB_STATUSES minus 'processing'). */
+export const CANCELABLE_EPISODE_STATUSES: EpisodeStatus[] = [
+  'pending',
+  'submitted',
+  'queued',
+]
+
+export const FAILED_EPISODE_STATUSES: EpisodeStatus[] = ['failed', 'error', 'canceled']
 
 export function groupEpisodesByStatus(episodes: PodcastEpisode[]): EpisodeStatusGroups {
   return episodes.reduce<EpisodeStatusGroups>(

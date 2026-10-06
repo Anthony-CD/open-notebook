@@ -12,6 +12,7 @@ from api.models import (
 )
 from open_notebook.database.repository import repo_query
 from open_notebook.exceptions import OpenNotebookError
+from open_notebook.utils.job_status import normalize_job_status, sanitize_job_error
 
 router = APIRouter()
 
@@ -131,7 +132,7 @@ async def get_rebuild_status(command_id: str):
     Get the status of a rebuild operation.
 
     Returns:
-    - **status**: queued, running, completed, failed
+    - **status**: queued, processing, completed, failed, canceled, unknown
     - **progress**: processed count, total count, percentage
     - **stats**: breakdown by type (sources, notes, insights, failed)
     - **timestamps**: started_at, completed_at
@@ -144,9 +145,10 @@ async def get_rebuild_status(command_id: str):
             raise HTTPException(status_code=404, detail="Rebuild command not found")
 
         # Build response based on status
+        public_status = normalize_job_status(status.status)
         response = RebuildStatusResponse(
             command_id=command_id,
-            status=status.status,
+            status=public_status,
         )
 
         # Extract metadata from command result
@@ -178,12 +180,12 @@ async def get_rebuild_status(command_id: str):
             response.completed_at = str(status.updated)
 
         # Add error message if failed
-        if (
-            status.status == "failed"
-            and status.result
-            and isinstance(status.result, dict)
-        ):
-            response.error_message = status.result.get("error_message", "Unknown error")
+        if public_status == "failed":
+            raw_error = None
+            if status.result and isinstance(status.result, dict):
+                raw_error = status.result.get("error_message")
+            raw_error = raw_error or getattr(status, "error_message", None)
+            response.error_message = sanitize_job_error(raw_error) or "Unknown error"
 
         return response
 
@@ -194,6 +196,4 @@ async def get_rebuild_status(command_id: str):
     except Exception as e:
         logger.error(f"Failed to get rebuild status: {e}")
         logger.exception(e)
-        raise HTTPException(
-            status_code=500, detail=f"Failed to get rebuild status: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail="Failed to get rebuild status")

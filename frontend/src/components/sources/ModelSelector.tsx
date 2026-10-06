@@ -19,15 +19,58 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { Settings2, Sparkles } from 'lucide-react'
+import { Settings2, Sparkles, Eye, Wrench } from 'lucide-react'
 import { useModelDefaults, useModels } from '@/lib/hooks/use-models'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import { Badge } from '@/components/ui/badge'
+import { Model } from '@/lib/types/models'
 
 interface ModelSelectorProps {
   currentModel?: string
   onModelChange: (model?: string) => void
   disabled?: boolean
+}
+
+/**
+ * Honest, best-effort model metadata - context window + capability badges.
+ * Renders the "unknown"/"not tracked" state explicitly rather than hiding
+ * the fact that most direct-provider models have no catalog data (see
+ * api/models.py ModelResponse.capabilities_known docstring) - no invented
+ * capabilities or context window.
+ */
+function ModelMetadataInfo({ model }: { model: Model }) {
+  const { t } = useTranslation()
+  const hasVision = model.capabilities?.includes('vision')
+  const hasTools = model.capabilities?.includes('tools')
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>
+        {model.context_window
+          ? t('models.contextWindowLabel', { count: model.context_window })
+          : t('models.contextWindowUnknown')}
+      </span>
+      {model.capabilities_known ? (
+        <>
+          {hasVision && (
+            <Badge variant="outline" className="gap-1 text-xs">
+              <Eye className="h-3 w-3" />
+              {t('models.capabilityVision')}
+            </Badge>
+          )}
+          {hasTools && (
+            <Badge variant="outline" className="gap-1 text-xs">
+              <Wrench className="h-3 w-3" />
+              {t('models.capabilityTools')}
+            </Badge>
+          )}
+        </>
+      ) : (
+        <span>{t('models.capabilitiesUnknown')}</span>
+      )}
+    </div>
+  )
 }
 
 export function ModelSelector({ 
@@ -148,12 +191,24 @@ export function ModelSelector({
             </Select>
           </div>
           {selectedModel && selectedModel !== 'default' && (
-            <div className="rounded-lg bg-muted p-3">
+            <div className="rounded-lg bg-muted p-3 space-y-2">
               <p className="text-sm text-muted-foreground">
                 {t('transformations.sessionUseReplacement', { name: languageModels.find(m => m.id === selectedModel)?.name || selectedModel })}
               </p>
+              {(() => {
+                const model = languageModels.find((m) => m.id === selectedModel)
+                return model ? <ModelMetadataInfo model={model} /> : null
+              })()}
             </div>
           )}
+          {selectedModel === 'default' && defaultModel && (
+            <div className="rounded-lg bg-muted p-3">
+              <ModelMetadataInfo model={defaultModel} />
+            </div>
+          )}
+          <p className="text-xs text-muted-foreground">
+            {t('models.embeddingModelDisabledHint')}
+          </p>
         </div>
         <DialogFooter className="flex justify-between">
           <Button variant="outline" onClick={handleReset}>

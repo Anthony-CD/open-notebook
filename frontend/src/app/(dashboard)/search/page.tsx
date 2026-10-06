@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { AppShell } from '@/components/layout/AppShell'
@@ -23,8 +23,19 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { StreamingResponse } from '@/components/search/StreamingResponse'
 import { AdvancedModelsDialog } from '@/components/search/AdvancedModelsDialog'
 import { SaveToNotebooksDialog } from '@/components/search/SaveToNotebooksDialog'
+import { AppShellSkeleton } from '@/components/layout/AppShellSkeleton'
 
+// useSearchParams() (?q=, ?mode=) must sit under a Suspense boundary or
+// Next bails the whole route out to client-only rendering.
 export default function SearchPage() {
+  return (
+    <Suspense fallback={<AppShellSkeleton />}>
+      <SearchPageContent />
+    </Suspense>
+  )
+}
+
+function SearchPageContent() {
   const { t } = useTranslation()
   // URL params
   const searchParams = useSearchParams()

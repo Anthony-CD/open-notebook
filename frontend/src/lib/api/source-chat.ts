@@ -5,7 +5,8 @@ import {
   SourceChatSessionWithMessages,
   CreateSourceChatSessionRequest,
   UpdateSourceChatSessionRequest,
-  SendMessageRequest
+  SendMessageRequest,
+  MessageFeedbackRequest
 } from '@/lib/types/api'
 
 export const sourceChatApi = {
@@ -69,5 +70,18 @@ export const sourceChatApi = {
       }
       return response.body
     })
+  },
+
+  setMessageFeedback: async (
+    sourceId: string,
+    sessionId: string,
+    messageId: string,
+    data: MessageFeedbackRequest
+  ) => {
+    const response = await apiClient.put<{ success: boolean; message: string }>(
+      `/sources/${sourceId}/chat/sessions/${sessionId}/messages/${messageId}/feedback`,
+      data
+    )
+    return response.data
   }
 }

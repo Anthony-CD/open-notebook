@@ -8,6 +8,13 @@ from open_notebook.utils.proxy import ensure_internal_no_proxy
 
 ensure_internal_no_proxy()
 
+# Skip jobs canceled while queued (POST /api/commands/jobs/{id}/cancel);
+# surreal_commands itself has no cancellation support.
+from .cancel_guard import install_cancel_guard
+
+install_cancel_guard()
+
+from .ask_sources_command import ask_across_sources_command
 from .embedding_commands import (
     embed_insight_command,
     embed_note_command,
@@ -16,6 +23,7 @@ from .embedding_commands import (
 )
 from .podcast_commands import generate_podcast_command
 from .source_commands import process_source_command
+from .study_commands import generate_flashcards_command, generate_quiz_command
 
 __all__ = [
     # Embedding commands
@@ -26,4 +34,8 @@ __all__ = [
     # Other commands
     "generate_podcast_command",
     "process_source_command",
+    # Study tools commands
+    "generate_flashcards_command",
+    "generate_quiz_command",
+    "ask_across_sources_command",
 ]

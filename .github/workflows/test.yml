@@ -2,9 +2,14 @@ name: Tests
 
 on:
   pull_request:
-    branches: [main]
+    # `master` además de `main`: en este fork la rama de trabajo es `master`
+    # (`main` quedó en un snapshot del upstream), así que con el filtro sólo en
+    # `main` esta suite no corría NUNCA sobre el trabajo propio — el fork no
+    # tenía una sola corrida en su historial. Cambiar la rama por defecto del
+    # repo no alcanza: este filtro es literal.
+    branches: [main, master]
   push:
-    branches: [main]
+    branches: [main, master]
     paths-ignore:
       - '**.md'
       - 'docs/**'

@@ -88,6 +88,90 @@ export function usePodcastEpisodes(options?: { autoRefresh?: boolean }) {
   }
 }
 
+/**
+ * Best-effort cost estimate for a podcast generation, fetched BEFORE the
+ * user confirms (GeneratePodcastDialog shows this next to the Generate
+ * button). Disabled until both profiles are chosen; refetches when the
+ * selection or token estimate changes. A fetch failure degrades to "no
+ * estimate available" rather than blocking generation - this is advisory.
+ */
+export function useGenerationEstimate(params: {
+  episodeProfile?: string
+  speakerProfile?: string
+  estimatedInputTokens?: number
+  enabled?: boolean
+}) {
+  const { episodeProfile, speakerProfile, estimatedInputTokens, enabled = true } = params
+
+  return useQuery({
+    queryKey: [
+      'podcast-generation-estimate',
+      episodeProfile,
+      speakerProfile,
+      estimatedInputTokens,
+    ],
+    queryFn: () =>
+      podcastsApi.estimateGeneration({
+        episodeProfile: episodeProfile as string,
+        speakerProfile: speakerProfile as string,
+        estimatedInputTokens,
+      }),
+    enabled: enabled && !!episodeProfile && !!speakerProfile,
+    retry: false,
+    staleTime: 15_000,
+  })
+}
+
+export function useCancelPodcastJob() {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: (jobId: string) => podcastsApi.cancelEpisodeJob(jobId),
+    onSuccess: async () => {
+      await queryClient.refetchQueries({ queryKey: QUERY_KEYS.podcastEpisodes })
+      toast({
+        title: t('podcasts.jobCanceled'),
+        description: t('podcasts.jobCanceledDesc'),
+      })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: t('podcasts.failedToCancelJob'),
+        description: getApiErrorKey(error, t('common.error')),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
+export function useUpdateEpisodeOrganization() {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: ({
+      episodeId,
+      payload,
+    }: {
+      episodeId: string
+      payload: { favorited?: boolean; tags?: string[] }
+    }) => podcastsApi.updateEpisodeOrganization(episodeId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.podcastEpisodes })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: t('podcasts.failedToUpdateEpisode'),
+        description: getApiErrorKey(error, t('common.error')),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
 export function useRetryPodcastEpisode() {
   const queryClient = useQueryClient()
   const { toast } = useToast()

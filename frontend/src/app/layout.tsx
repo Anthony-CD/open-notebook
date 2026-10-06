@@ -33,6 +33,18 @@ const splineSansMono = Spline_Sans_Mono({
 export const metadata: Metadata = {
   title: "Open Notebook",
   description: "Privacy-focused research and knowledge management",
+  // The app ships 14 real, human-quality translations via its own i18n
+  // system (see lib/i18n.ts) - Chrome's built-in page translator has no
+  // way to know that and can still offer/auto-apply itself on top, which
+  // not only produces confusing double-translation but has previously
+  // caused real React crashes here (facebook/react#11538: the translator
+  // rewrites text nodes in place, detaching them from React's tree, which
+  // throws on the next poll-driven re-render - see EpisodeCard/
+  // AskAcrossSourcesDialog fixes). Opt the whole app out; the existing
+  // in-app language switcher is the supported way to change language.
+  other: {
+    google: "notranslate",
+  },
 };
 
 export default function RootLayout({

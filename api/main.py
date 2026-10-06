@@ -23,11 +23,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from api.auth import PasswordAuthMiddleware
 from api.middleware import MaxBodySizeMiddleware, get_max_upload_size_bytes
 from api.routers import (
+    activity,
     auth,
     capabilities,
     chat,
     config,
     credentials,
+    drive,
     embedding,
     embedding_rebuild,
     episode_profiles,
@@ -37,13 +39,16 @@ from api.routers import (
     notebooks,
     notes,
     podcasts,
+    privacy,
     providers,
     search,
     settings,
     source_chat,
     sources,
     speaker_profiles,
+    study,
     transformations,
+    usage,
 )
 from api.routers import commands as commands_router
 from open_notebook.database.async_migrate import AsyncMigrationManager
@@ -244,6 +249,11 @@ app.add_middleware(
         "/redoc",
         "/api/auth/status",
         "/api/config",
+        # Google redirects the bare browser here with ?code=... - it cannot
+        # carry this app's Authorization bearer header. Safe to exclude: the
+        # one-time authorization code (scoped to our registered client_id +
+        # redirect_uri) is the real gate, not this app's password.
+        "/api/drive/callback",
     ],
 )
 
@@ -404,6 +414,11 @@ app.include_router(credentials.router, prefix="/api", tags=["credentials"])
 app.include_router(providers.router, prefix="/api", tags=["providers"])
 app.include_router(capabilities.router, prefix="/api", tags=["capabilities"])
 app.include_router(languages.router, prefix="/api", tags=["languages"])
+app.include_router(study.router, prefix="/api", tags=["study"])
+app.include_router(usage.router, prefix="/api", tags=["usage"])
+app.include_router(drive.router, prefix="/api", tags=["drive"])
+app.include_router(activity.router, prefix="/api", tags=["activity"])
+app.include_router(privacy.router, prefix="/api", tags=["privacy"])
 
 
 @app.get("/")

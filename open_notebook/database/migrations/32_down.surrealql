@@ -1,0 +1,3 @@
+-- Down migration 32: drop chat message feedback table.
+
+REMOVE TABLE IF EXISTS chat_feedback;

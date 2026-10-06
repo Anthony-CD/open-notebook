@@ -1,0 +1,28 @@
+-- Migration 30: Source lifecycle fields (P1 "Fuentes e ingestion")
+--
+-- NOTE: originally authored as migration 29, renumbered to 30 after a
+-- parallel agent claimed 29 first for transformation-result versioning
+-- (source_insight.transformation/version) - see 29.surrealql.
+--
+-- content_hash: sha256 of the raw file bytes (uploads) or extracted text
+--   (links/text sources), computed at ingestion time - see
+--   open_notebook/graphs/source.py content_process()/save_source(). Backward
+--   compatible: existing sources get content_hash = NONE and are never
+--   backfilled by re-reading old files - they simply aren't flagged as
+--   duplicates of anything until reprocessed/retried, which recomputes it.
+-- duplicate_of: set by save_source() when another source in one of this
+--   source's notebooks already has the same content_hash. Non-authoritative
+--   UX hint only (first match wins, cleared again if no longer a match on
+--   reprocess) - never blocks ingestion by itself.
+-- archived: mirrors Notebook.archived (migration 1) - Source had no
+--   archive/unarchive concept before this.
+
+DEFINE FIELD IF NOT EXISTS content_hash ON TABLE source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS duplicate_of ON TABLE source TYPE option<record<source>>;
+DEFINE FIELD IF NOT EXISTS archived ON TABLE source TYPE option<bool> DEFAULT false;
+
+-- Backfill only the new boolean default for existing rows (NONE -> false).
+-- content_hash/duplicate_of are deliberately left as NONE - see note above.
+UPDATE source SET archived = false WHERE archived = NONE;
+
+DEFINE INDEX IF NOT EXISTS idx_source_content_hash ON TABLE source COLUMNS content_hash CONCURRENTLY;

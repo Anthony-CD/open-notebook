@@ -17,6 +17,8 @@ import { notebooksApi } from '@/lib/api/notebooks'
 import type { RecentlyViewedResponse } from '@/lib/types/api'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getDateLocale } from '@/lib/utils/date-locale'
+import { cn } from '@/lib/utils'
+import { densityClass, usePreferencesStore } from '@/lib/stores/preferences-store'
 
 interface RecentlyViewedProps {
   limit?: number
@@ -47,6 +49,7 @@ export function RecentlyViewed({ limit = 12 }: RecentlyViewedProps) {
   const { t, language } = useTranslation()
   const [isOpen, setIsOpen] = useState(true)
   const locale = getDateLocale(language)
+  const density = usePreferencesStore((state) => state.density)
   const { data: items, isLoading, isError } = useQuery({
     queryKey: ['recently-viewed', limit],
     queryFn: () => notebooksApi.recentlyViewed(limit),
@@ -96,7 +99,10 @@ export function RecentlyViewed({ limit = 12 }: RecentlyViewedProps) {
               <Link
                 key={`${item.type}-${item.id}`}
                 href={getItemHref(item)}
-                className="group flex items-center gap-3 rounded-md border bg-card px-3 py-2 card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className={cn(
+                  'group flex items-center gap-3 rounded-md border bg-card card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  densityClass(density, 'px-3 py-2', 'px-2.5 py-1')
+                )}
               >
                 <div
                   className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted ${

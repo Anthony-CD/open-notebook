@@ -1,0 +1,3 @@
+-- Down migration 34: drop audit log table.
+
+REMOVE TABLE IF EXISTS audit_log;

@@ -41,6 +41,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-destructive-tint: var(--danger-tint);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
@@ -144,8 +145,12 @@
   --sage-deep: #47603f;
   --sage-tint: #e5ebdc;
 
-  --gold: #a97b12;
-  --gold-deep: #7c5a05;
+  /* WCAG AA audit: the undarkened #a97b12 only hit 3.17:1 against its own
+     --gold-tint (badges/chips pair text-gold on bg-gold-tint) - below the
+     4.5:1 small-text floor. Darkened just enough to clear it (4.5-4.6:1)
+     without touching the other hue pairs, which already pass. */
+  --gold: #87600d;
+  --gold-deep: #6b4a07;
   --gold-tint: #f3ead3;
 
   --teal: #0e7268;
@@ -155,8 +160,10 @@
   --plum: #5d4991;
   --plum-tint: #eae6f3;
 
-  --mauve: #8d5b80;
-  --mauve-deep: #714566;
+  /* WCAG AA audit: #8d5b80 was a near-miss at 4.36:1 against --mauve-tint
+     (below the 4.5:1 floor for small text). Nudged darker to clear it. */
+  --mauve: #7c4e70;
+  --mauve-deep: #633f59;
   --mauve-tint: #f1e5ee;
 
   --slate: #4e6b84;
@@ -197,6 +204,11 @@
   --danger: #b0432d;
   --danger-deep: #93341f;
   --danger-tint: #f5e4df;
+  /* Text/icon color for solid destructive buttons (bg-destructive). Light
+     mode's --danger is dark enough for white text (5.7:1); dark mode's
+     --danger is deliberately a light coral for on-background use, so it
+     needs its own dark foreground there - see the .dark override below. */
+  --destructive-foreground: #ffffff;
 
   --warn: var(--clay);
   --warn-deep: var(--clay-deep);
@@ -344,13 +356,19 @@
   --line-soft: #26282d;
   --line-strong: #ecedea;
 
-  --primary: #3d8e67;
-  --primary-hover: #479e74;
+  /* WCAG AA audit: #3d8e67 only hit 3.63:1 against --on-primary (below the
+     4.5:1 floor for primary-button text) - darkened so the existing light
+     on-primary text clears AA, instead of inventing a new text color. */
+  --primary: #2e6b4f;
+  --primary-hover: #317357;
   --on-primary: #ecf7f0;
 
   --danger: #df7c63;
   --danger-deep: #e9937d;
   --danger-tint: #37231d;
+  /* #ffffff on this light coral only hit 2.92:1 - fails badly. Dark text
+     reads correctly against the light-mode-ish destructive red used here. */
+  --destructive-foreground: #17181b;
 
   /* evidence washes */
   --excerpt-wash: #1c2a28;
@@ -436,5 +454,19 @@
   .prose blockquote p::before,
   .prose blockquote p::after {
     content: none !important;
+  }
+
+  /* Sonner hardcodes z-index: 999999999 on its toaster container with no
+     prop to override it (see node_modules/sonner's injected stylesheet).
+     That sits far above this app's Radix dialogs (z-50, see ui/dialog.tsx),
+     so a toast positioned over a dialog's action buttons (the default
+     bottom-right position can land there) silently swallows clicks - the
+     user clicks "Done"/"Save"/etc., the toast intercepts the event, and
+     nothing happens with no visible error. Force toasts below dialogs/
+     overlays (z-50) so an open dialog always wins the stack; they stay
+     comfortably above ordinary page content otherwise. !important is
+     required to beat sonner's own injected rule regardless of DOM order. */
+  [data-sonner-toaster] {
+    z-index: 40 !important;
   }
 }

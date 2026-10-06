@@ -403,6 +403,11 @@ class Source(ObjectModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     table_name: ClassVar[str] = "source"
+    # duplicate_of must be saveable as NONE - a reprocess that no longer
+    # matches anything needs to clear a previously-set value, not just skip
+    # writing it (ObjectModel._prepare_save_data() otherwise drops None
+    # fields from the UPDATE entirely, leaving the stale value in place).
+    nullable_fields: ClassVar[set[str]] = {"duplicate_of"}
     asset: Optional[Asset] = None
     title: Optional[str] = None
     topics: Optional[List[str]] = Field(default_factory=list)
@@ -411,11 +416,32 @@ class Source(ObjectModel):
     command: Optional[Union[str, RecordID]] = Field(
         default=None, description="Link to surreal-commands processing job"
     )
+    # sha256 of the raw file bytes (uploads) or extracted text (links/text),
+    # computed at ingestion time - see open_notebook/graphs/source.py. NONE
+    # for sources created before this field existed or re-touched since;
+    # never backfilled by re-reading old files (see migration 30).
+    content_hash: Optional[str] = None
+    # Set by the source_graph when another source in one of this source's
+    # notebooks already shares the same content_hash. A UX hint only (first
+    # match found, cleared again on reprocess if it's no longer a match) -
+    # never blocks ingestion by itself.
+    duplicate_of: Optional[Union[str, RecordID]] = None
+    # Mirrors Notebook.archived. Archived sources are hidden from the default
+    # list view but not deleted - their chunks/embeddings/insights stay intact.
+    archived: Optional[bool] = False
 
     @field_validator("command", mode="before")
     @classmethod
     def parse_command(cls, value):
         """Parse command field to ensure RecordID format"""
+        if isinstance(value, str) and value:
+            return ensure_record_id(value)
+        return value
+
+    @field_validator("duplicate_of", mode="before")
+    @classmethod
+    def parse_duplicate_of(cls, value):
+        """Normalize duplicate_of to RecordID format, like command."""
         if isinstance(value, str) and value:
             return ensure_record_id(value)
         return value
@@ -438,8 +464,13 @@ class Source(ObjectModel):
         try:
             from surreal_commands import get_command_status
 
+            from open_notebook.utils.job_status import normalize_job_status
+
             status = await get_command_status(str(self.command))
-            return status.status if status else "unknown"
+            # Public vocabulary (queued/processing/completed/failed/canceled/
+            # unknown) - never the raw CommandStatus enum, whose str() is
+            # "CommandStatus.NEW" on Python 3.11+.
+            return normalize_job_status(status.status if status else None)
         except Exception as e:
             logger.warning(f"Failed to get command status for {self.command}: {e}")
             return "unknown"
@@ -462,12 +493,21 @@ class Source(ObjectModel):
                 result.get("execution_metadata", {}) if isinstance(result, dict) else {}
             )
 
+            from open_notebook.utils.job_status import (
+                normalize_job_status,
+                sanitize_job_error,
+            )
+
+            # Only client-safe fields: no raw command result payload (it can
+            # carry internal data) and a sanitized error. surreal_commands
+            # exposes no progress value, so none is reported here.
             return {
-                "status": status_result.status,
+                "status": normalize_job_status(status_result.status),
                 "started_at": execution_metadata.get("started_at"),
                 "completed_at": execution_metadata.get("completed_at"),
-                "error": getattr(status_result, "error_message", None),
-                "result": result,
+                "error": sanitize_job_error(
+                    getattr(status_result, "error_message", None)
+                ),
             }
         except Exception as e:
             logger.warning(f"Failed to get command progress for {self.command}: {e}")
@@ -528,6 +568,92 @@ class Source(ObjectModel):
             raise InvalidInputError("Notebook ID must be provided")
         await Notebook.get(notebook_id)  # raises NotFoundError if invalid/missing
         return await self.relate("reference", notebook_id)
+
+    @classmethod
+    async def find_duplicate(
+        cls,
+        content_hash: Optional[str],
+        notebook_ids: List[str],
+        exclude_id: Optional[str] = None,
+    ) -> Optional["Source"]:
+        """Find another source sharing ``content_hash`` in any of ``notebook_ids``.
+
+        Returns None (never raises) when ``content_hash`` or ``notebook_ids``
+        is falsy - a source with no hash yet is never flagged as a duplicate
+        of anything - or when the lookup itself fails; duplicate detection is
+        a UX nicety, not a correctness requirement, so a DB hiccup here must
+        not block ingestion.
+        """
+        if not content_hash or not notebook_ids:
+            return None
+        try:
+            params: Dict[str, Any] = {
+                "hash": content_hash,
+                "notebook_ids": [ensure_record_id(nb) for nb in notebook_ids],
+            }
+            exclude_clause = ""
+            if exclude_id:
+                exclude_clause = "AND id != $exclude_id"
+                params["exclude_id"] = ensure_record_id(exclude_id)
+            result = await repo_query(
+                f"""
+                SELECT * FROM source
+                WHERE content_hash = $hash
+                {exclude_clause}
+                AND id IN (SELECT VALUE in FROM reference WHERE out IN $notebook_ids)
+                LIMIT 1
+                """,
+                params,
+            )
+            return cls(**result[0]) if result else None
+        except Exception as e:
+            logger.warning(f"Duplicate lookup failed for a source hash: {e}")
+            return None
+
+    async def get_delete_preview(self) -> Dict[str, Any]:
+        """
+        Get counts of items that would be affected by deleting this source,
+        for an explicit (not generic) delete confirmation.
+
+        Returns a dict with:
+        - chunk_count: source_embedding rows that will be deleted
+        - insight_count: source_insight rows that will be deleted
+        - chat_session_count: source-scoped chat sessions (refers_to ->
+          source) that reference this source directly and will be deleted
+          with it. NOTE: this does not count inline citations inside
+          notebook-wide chat answers - those aren't tracked by a foreign key
+          anywhere in the schema, so they can't be enumerated here.
+        - notebook_count: notebooks this source is linked to (unlinked, not
+          deleted, by this operation)
+        """
+        try:
+            source_id = ensure_record_id(self.id)
+            chunk_result = await repo_query(
+                "SELECT count() AS count FROM source_embedding WHERE source = $id GROUP ALL",
+                {"id": source_id},
+            )
+            insight_result = await repo_query(
+                "SELECT count() AS count FROM source_insight WHERE source = $id GROUP ALL",
+                {"id": source_id},
+            )
+            chat_result = await repo_query(
+                "SELECT count() AS count FROM refers_to WHERE out = $id GROUP ALL",
+                {"id": source_id},
+            )
+            notebook_result = await repo_query(
+                "SELECT count() AS count FROM reference WHERE in = $id GROUP ALL",
+                {"id": source_id},
+            )
+            return {
+                "chunk_count": chunk_result[0]["count"] if chunk_result else 0,
+                "insight_count": insight_result[0]["count"] if insight_result else 0,
+                "chat_session_count": chat_result[0]["count"] if chat_result else 0,
+                "notebook_count": notebook_result[0]["count"] if notebook_result else 0,
+            }
+        except Exception as e:
+            logger.error(f"Error building delete preview for source {self.id}: {str(e)}")
+            logger.exception(e)
+            raise DatabaseOperationError(f"Failed to build delete preview: {str(e)}")
 
     async def vectorize(self) -> str:
         """
@@ -630,12 +756,16 @@ class Source(ObjectModel):
             raise DatabaseOperationError(e)
 
     def _prepare_save_data(self) -> dict:
-        """Override to ensure command field is always RecordID format for database"""
+        """Override to ensure command/duplicate_of fields are always RecordID
+        format for database."""
         data = super()._prepare_save_data()
 
         # Ensure command field is RecordID format if not None
         if data.get("command") is not None:
             data["command"] = ensure_record_id(data["command"])
+
+        if data.get("duplicate_of") is not None:
+            data["duplicate_of"] = ensure_record_id(data["duplicate_of"])
 
         return data
 

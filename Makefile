@@ -1,4 +1,4 @@
-.PHONY: run frontend check ruff database lint api start-all stop-all status clean-cache worker worker-start worker-stop worker-restart
+.PHONY: run frontend check ruff database lint api start-all stop-all status clean-cache worker worker-start worker-stop worker-restart health
 .PHONY: docker-buildx-prepare docker-buildx-clean docker-buildx-reset
 .PHONY: docker-push docker-push-latest docker-release docker-build-local tag export-docs
 .PHONY: release-test release-stack release-stack-down
@@ -69,6 +69,7 @@ release-stack-down:
 docker-build-local:
 	@echo "🔨 Building production image locally ($(shell uname -m))..."
 	docker build \
+		--build-arg GIT_COMMIT_SHA=$(shell git rev-parse --short HEAD 2>/dev/null) \
 		-t $(DOCKERHUB_IMAGE):$(VERSION) \
 		-t $(DOCKERHUB_IMAGE):local \
 		.
@@ -210,6 +211,15 @@ status:
 	@pgrep -f "surreal-commands-worker" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
 	@echo "Next.js Frontend:"
 	@pgrep -f "next dev" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
+
+# === Deployment health probe (Fixbot) ===
+# Mide el despliegue REAL desde afuera, sin sesión y sin secretos. La URL sale
+# de ON_HEALTH_URL (en CI, del secreto de repo del mismo nombre) porque este
+# repo es público y la URL del túnel no se publica. Salidas: 0 todo bien,
+# 1 algo roto, 2 falta configurar ON_HEALTH_URL. Ver scripts/README.md.
+health:
+	@test -n "$(ON_HEALTH_URL)" || (echo "❌ Falta ON_HEALTH_URL. Ej: ON_HEALTH_URL=https://tu-tunel.trycloudflare.com make health"; exit 2)
+	@python3 scripts/health_check.py --url="$(ON_HEALTH_URL)"
 
 # === Documentation Export ===
 export-docs:

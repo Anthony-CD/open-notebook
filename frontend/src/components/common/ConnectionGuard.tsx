@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { ConnectionError } from '@/lib/types/config'
 import { ConnectionErrorOverlay } from '@/components/errors/ConnectionErrorOverlay'
 import { getConfig, resetConfig } from '@/lib/config'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 
 interface ConnectionGuardProps {
   children: React.ReactNode
@@ -98,9 +99,19 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
     return <ConnectionErrorOverlay error={error} onRetry={checkConnection} />
   }
 
-  // Show nothing while checking (prevents flash of content)
+  // While checking, show a text-free loader instead of a blank page. A
+  // `return null` here made every hard reload look like a white screen for
+  // as long as /api/config took (it can wait on a GitHub version check).
   if (isChecking) {
-    return null
+    return (
+      <div
+        className="min-h-screen flex items-center justify-center bg-background"
+        aria-busy="true"
+        data-testid="connection-check"
+      >
+        <LoadingSpinner className="text-muted-foreground" />
+      </div>
+    )
   }
 
   // Render children if connection is good

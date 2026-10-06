@@ -35,4 +35,14 @@ export const QUERY_KEYS = {
   episodeProfiles: ['podcasts', 'episode-profiles'] as const,
   speakerProfiles: ['podcasts', 'speaker-profiles'] as const,
   languages: ['languages'] as const,
+  usageSummary: (period: 'month' | 'year') => ['usage', 'summary', period] as const,
+  studySetsForNotebook: (notebookId: string) => ['study', 'notebook', notebookId] as const,
+  studySet: (studySetId: string) => ['study', 'set', studySetId] as const,
+  studyJob: (jobId: string) => ['study', 'job', jobId] as const,
+  studyMetrics: (notebookId?: string) => ['study', 'metrics', notebookId ?? 'all'] as const,
+  commandJob: (jobId: string) => ['commands', 'job', jobId] as const,
+  driveStatus: ['drive', 'status'] as const,
+  driveFiles: (query: string, pageToken?: string) => ['drive', 'files', query, pageToken ?? ''] as const,
+  activity: (action: string | undefined, limit: number, offset: number) =>
+    ['activity', action ?? 'all', limit, offset] as const,
 }

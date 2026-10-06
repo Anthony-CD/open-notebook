@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 
 import { EpisodeCard } from './EpisodeCard'
 import type { PodcastEpisode } from '@/lib/types/podcasts'
@@ -12,6 +12,14 @@ vi.mock('@/lib/api/client', () => ({
 
 vi.mock('@/lib/api/podcasts', () => ({
   resolvePodcastAssetUrl: vi.fn(async () => undefined),
+}))
+
+// EpisodeCard also drives cancel/organization mutations via these hooks -
+// mock them (same pattern as CostMeterWidget.test.tsx) instead of wrapping
+// every render in a real QueryClientProvider.
+vi.mock('@/lib/hooks/use-podcasts', () => ({
+  useCancelPodcastJob: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+  useUpdateEpisodeOrganization: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
 }))
 
 function makeEpisode(overrides: Partial<PodcastEpisode> = {}): PodcastEpisode {
@@ -133,5 +141,47 @@ describe('EpisodeCard model details', () => {
     )
 
     expect(screen.getAllByText('— / —')).toHaveLength(3)
+  })
+})
+
+describe('EpisodeCard audio wiring', () => {
+  // The actual load/play/download/fetch behavior (including the
+  // apiClient /api double-prefix regression and the "don't re-fetch
+  // already-loaded audio" guard) now lives in PodcastAudioPlayer and is
+  // covered directly in PodcastAudioPlayer.test.tsx. EpisodeCard's own job
+  // is just to mount that component - inline in the card, and again inside
+  // the details dialog - whenever the episode has audio.
+  it('renders a PodcastAudioPlayer (inline) when the episode has a protected audio_url', () => {
+    render(
+      <EpisodeCard
+        episode={makeEpisode({ audio_url: '/api/podcasts/episodes/episode:1/audio' })}
+        onDelete={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'podcasts.loadAudioToPlay' })).toBeInTheDocument()
+  })
+
+  it('renders a second, independent PodcastAudioPlayer inside the details dialog', () => {
+    renderAndOpenDetails(
+      makeEpisode({ audio_url: '/api/podcasts/episodes/episode:1/audio' })
+    )
+
+    // Radix's open Dialog marks the rest of the page aria-hidden (focus
+    // trap), so the inline card player is still mounted but no longer
+    // query-visible by role from outside - scope to the dialog itself to
+    // confirm it got its own PodcastAudioPlayer instance.
+    const dialog = screen.getByRole('dialog')
+    expect(
+      within(dialog).getByRole('button', { name: 'podcasts.loadAudioToPlay' })
+    ).toBeInTheDocument()
+  })
+
+  it('renders no audio player when the episode has neither audio_file nor audio_url', () => {
+    render(<EpisodeCard episode={makeEpisode()} onDelete={vi.fn()} />)
+
+    expect(
+      screen.queryByRole('button', { name: 'podcasts.loadAudioToPlay' })
+    ).not.toBeInTheDocument()
   })
 })

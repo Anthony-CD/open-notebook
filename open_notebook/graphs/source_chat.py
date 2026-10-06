@@ -15,6 +15,12 @@ from open_notebook.config import LANGGRAPH_CHECKPOINT_FILE
 from open_notebook.domain.notebook import Source, SourceInsight
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.utils import clean_thinking_content
+from open_notebook.utils.citations import (
+    build_references_from_source_context,
+    parse_cited_references,
+    references_to_citation_dicts,
+    render_reference_list,
+)
 from open_notebook.utils.context_builder import (
     build_source_context,
     format_source_context,
@@ -132,14 +138,20 @@ def _call_model_with_source_context_inner(
             insights.append(insight)
             context_indicators["insights"].append(insight.id)
 
-    # Format context for the prompt
+    # Format context for the prompt. format_source_context's plain Markdown
+    # dump is kept for anything still reading the raw "context" string (e.g.
+    # the /chat/context-style char/token counters), but the prompt itself now
+    # gets a numbered reference list so citations can be verified against it
+    # instead of trusting whatever raw ID the model decides to emit.
     formatted_context = _format_source_context(context_data)
+    references = build_references_from_source_context(context_data)
+    rendered_references = render_reference_list(references) if references else None
 
     # Build prompt data for the template
     prompt_data = {
         "source": source.model_dump() if source else None,
         "insights": [insight.model_dump() for insight in insights] if insights else [],
-        "context": formatted_context,
+        "context": rendered_references,
         "context_indicators": context_indicators,
     }
 
@@ -194,7 +206,17 @@ def _call_model_with_source_context_inner(
     # Clean thinking content from AI response (e.g., <think>...</think> tags)
     content = extract_text_content(ai_message.content)
     cleaned_content = clean_thinking_content(content)
-    cleaned_message = ai_message.model_copy(update={"content": cleaned_content})
+
+    cited_references = parse_cited_references(cleaned_content, references)
+    cleaned_message = ai_message.model_copy(
+        update={
+            "content": cleaned_content,
+            "additional_kwargs": {
+                **ai_message.additional_kwargs,
+                "citations": references_to_citation_dicts(cited_references),
+            },
+        }
+    )
 
     # Update state with context information
     return {

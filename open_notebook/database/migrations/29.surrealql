@@ -1,0 +1,24 @@
+-- Migration 29: Versioning seed fields for transformation results.
+--
+-- Re-running a transformation on a source that already has a result from it
+-- never overwrote anything - create_insight_command (commands/
+-- embedding_commands.py) always CREATEs a new source_insight row, it never
+-- UPDATEs one. What was missing was a coherent "version" concept to present
+-- that history (today it's a flat, growing list of same-titled insights).
+--
+-- This migration only adds two optional, purely additive fields so a future
+-- write path can record them explicitly:
+--   * transformation: which transformation produced this insight (today the
+--     only link is the fragile insight_type == transformation.title match).
+--   * version: an explicit 1-based version number for this
+--     (source, transformation) pair.
+-- Both are optional with no default and no backfill: existing (and, until a
+-- write path sets them, new) rows simply have version = NONE, and callers
+-- treat that as "implicitly version 1" ordered by created - see
+-- Transformation.get_result_versions() in open_notebook/domain/
+-- transformation.py, which computes version history today from existing
+-- data and prefers an explicit `version` value once something populates it.
+-- No data loss, no backfill required.
+
+DEFINE FIELD IF NOT EXISTS transformation ON TABLE source_insight TYPE option<record<transformation>>;
+DEFINE FIELD IF NOT EXISTS version ON TABLE source_insight TYPE option<int>;

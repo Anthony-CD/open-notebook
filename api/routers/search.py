@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from api.models import AskRequest, AskResponse, SearchRequest, SearchResponse
+from api.search_service import search_chat_messages
 from open_notebook.ai.models import Model, model_manager
 from open_notebook.domain.notebook import text_search, vector_search
 from open_notebook.exceptions import (
@@ -20,7 +21,13 @@ router = APIRouter()
 
 @router.post("/search", response_model=SearchResponse)
 async def search_knowledge_base(search_request: SearchRequest):
-    """Search the knowledge base using text or vector search."""
+    """Search the knowledge base using text or vector search.
+
+    Also matches chat conversation messages when `search_chats` is set (see
+    api/search_service.py's search_chat_messages) - the one real gap found
+    in global search coverage; sources/notes/insights were already covered
+    (see that module's docstring for why).
+    """
     try:
         if search_request.type == "vector":
             # Check if embedding model is available for vector search
@@ -46,9 +53,23 @@ async def search_knowledge_base(search_request: SearchRequest):
                 note=search_request.search_notes,
             )
 
+        results = list(results or [])
+
+        if search_request.search_chats:
+            try:
+                results.extend(
+                    await search_chat_messages(
+                        search_request.query, search_request.limit
+                    )
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Chat message search failed, continuing without it: {e}"
+                )
+
         return SearchResponse(
-            results=results or [],
-            total_count=len(results) if results else 0,
+            results=results,
+            total_count=len(results),
             search_type=search_request.type,
         )
 

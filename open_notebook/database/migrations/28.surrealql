@@ -1,0 +1,41 @@
+-- Migration 28: Honest usage/cost accounting for usage_event
+-- (see open_notebook/ai/pricing.py and open_notebook/domain/usage.py).
+--
+-- Before this, any non-OpenRouter provider or unknown model was priced at
+-- (0, 0), so unknown costs were stored as a fake $0. Now:
+--   * estimated_cost_usd becomes optional (NONE = cost unknown) with no
+--     DEFAULT 0 - the app omits the field when the price is unknown.
+--   * cost_status: 'known' | 'free' | 'unknown'
+--   * pricing_version: which price source/table version priced the event
+--   * cached_input_tokens: cache-read input tokens (NONE = not reported)
+--   * failed / error_type: the call ended in on_llm_error
+-- Purely additive for readers; existing rows keep provider/model_name/
+-- task_type/input_tokens/output_tokens/created untouched.
+
+DEFINE FIELD OVERWRITE estimated_cost_usd ON TABLE usage_event TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS cost_status ON TABLE usage_event TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['known', 'free', 'unknown'];
+DEFINE FIELD IF NOT EXISTS pricing_version ON TABLE usage_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS cached_input_tokens ON TABLE usage_event TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS failed ON TABLE usage_event TYPE option<bool> DEFAULT false;
+DEFINE FIELD IF NOT EXISTS error_type ON TABLE usage_event TYPE option<string>;
+
+-- Backfill cost_status for pre-28 rows (only rows that don't have one yet).
+-- 1) A positive stored cost was really priced (OpenRouter catalog).
+UPDATE usage_event SET cost_status = 'known', pricing_version = 'legacy-openrouter-catalog'
+    WHERE cost_status = NONE AND estimated_cost_usd > 0;
+-- 2) Explicitly free models (OpenRouter ':free', '-free' / '/free' tags,
+--    local runtimes) - a stored 0 is genuinely $0.
+UPDATE usage_event SET cost_status = 'free', estimated_cost_usd = 0.0, pricing_version = 'legacy-free-rule'
+    WHERE cost_status = NONE
+    AND (string::ends_with(string::lowercase(model_name), ':free')
+        OR string::ends_with(string::lowercase(model_name), '-free')
+        OR string::ends_with(string::lowercase(model_name), '/free')
+        OR provider IN ['ollama', 'omlx']);
+-- 3) Everything else stored 0 because the old code had no price for it:
+--    the cost is unknown, not $0.
+UPDATE usage_event SET cost_status = 'unknown', estimated_cost_usd = NONE
+    WHERE cost_status = NONE;
+UPDATE usage_event SET failed = false WHERE failed = NONE;
+
+DEFINE INDEX IF NOT EXISTS idx_usage_event_model_name ON TABLE usage_event COLUMNS model_name CONCURRENTLY;

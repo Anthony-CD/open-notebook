@@ -1,0 +1,80 @@
+import apiClient from './client'
+import {
+  GenerateStudySetRequest,
+  GradeFlashcardResponse,
+  ReviewFlashcardResponse,
+  SrsRating,
+  StudyMetrics,
+  StudySet,
+  StudySetGenerationResponse,
+  StudySetListItem,
+  StudyJobStatusResponse,
+  SuspendFlashcardResponse,
+} from '@/lib/types/study'
+
+export const studyApi = {
+  generateFlashcards: async (payload: GenerateStudySetRequest) => {
+    const response = await apiClient.post<StudySetGenerationResponse>('/study/flashcards', payload)
+    return response.data
+  },
+
+  generateQuiz: async (payload: GenerateStudySetRequest) => {
+    const response = await apiClient.post<StudySetGenerationResponse>('/study/quiz', payload)
+    return response.data
+  },
+
+  getJobStatus: async (jobId: string) => {
+    const response = await apiClient.get<StudyJobStatusResponse>(`/study/jobs/${jobId}`)
+    return response.data
+  },
+
+  listForNotebook: async (notebookId: string) => {
+    const response = await apiClient.get<StudySetListItem[]>(`/notebooks/${notebookId}/study`)
+    return response.data
+  },
+
+  get: async (studySetId: string) => {
+    const response = await apiClient.get<StudySet>(`/study/${studySetId}`)
+    return response.data
+  },
+
+  delete: async (studySetId: string) => {
+    await apiClient.delete(`/study/${studySetId}`)
+  },
+
+  reviewFlashcard: async (studySetId: string, itemIndex: number, rating: SrsRating) => {
+    const response = await apiClient.post<ReviewFlashcardResponse>(
+      `/study/${studySetId}/items/${itemIndex}/review`,
+      { rating }
+    )
+    return response.data
+  },
+
+  gradeFlashcardAnswer: async (
+    studySetId: string,
+    itemIndex: number,
+    answer: string,
+    attempt: number
+  ) => {
+    const response = await apiClient.post<GradeFlashcardResponse>(
+      `/study/${studySetId}/items/${itemIndex}/grade`,
+      { answer, attempt }
+    )
+    return response.data
+  },
+
+  suspendFlashcard: async (studySetId: string, itemIndex: number, suspended: boolean) => {
+    const response = await apiClient.post<SuspendFlashcardResponse>(
+      `/study/${studySetId}/items/${itemIndex}/suspend`,
+      { suspended }
+    )
+    return response.data
+  },
+
+  getMetrics: async (notebookId?: string) => {
+    const response = await apiClient.get<StudyMetrics>('/study/metrics', {
+      params: notebookId ? { notebook_id: notebookId } : undefined,
+    })
+    return response.data
+  },
+}

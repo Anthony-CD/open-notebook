@@ -23,6 +23,7 @@ Or all at once: `make start-all` (status: `make status`, stop: `make stop-all`).
 - Python lint/typecheck: `ruff check . --fix` · `uv run python -m mypy .`
 - Frontend (inside `frontend/`): `npm run lint` · `npm run test` · `npm run build`
 - Docker release: `make docker-release` (see `.github/RELEASE_PROCESS.md`)
+- Sonda de salud del despliegue: `ON_HEALTH_URL=<url> make health` — la corre el Fixbot cada 6h (ver [scripts/README.md](scripts/README.md))
 
 ## Hard rules
 

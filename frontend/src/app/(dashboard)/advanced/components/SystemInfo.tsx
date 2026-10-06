@@ -47,11 +47,14 @@ export function SystemInfo() {
         <h2 className="font-display text-xl font-semibold tracking-tight">{t('advanced.systemInfo')}</h2>
 
         <div className="space-y-3">
-          {/* Current Version */}
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">{t('advanced.currentVersion')}</span>
-            <Badge variant="outline" className="font-mono text-[11px]">{config?.version || t('advanced.unknown')}</Badge>
-          </div>
+          {/* Current Version - hidden when the backend can't report one
+              (instead of showing a meaningless "unknown") */}
+          {config?.version && (
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">{t('advanced.currentVersion')}</span>
+              <Badge variant="outline" className="font-mono text-[11px]">{config.version}</Badge>
+            </div>
+          )}
 
           {/* Latest Version */}
           {config?.latestVersion && (

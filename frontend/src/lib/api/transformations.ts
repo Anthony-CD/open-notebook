@@ -5,7 +5,12 @@ import {
   UpdateTransformationRequest,
   ExecuteTransformationRequest,
   ExecuteTransformationResponse,
-  DefaultPrompt
+  DefaultPrompt,
+  PreviewTransformationRequest,
+  PreviewTransformationResponse,
+  EstimateTransformationCostRequest,
+  EstimateTransformationCostResponse,
+  TransformationResultHistory,
 } from '@/lib/types/transformations'
 
 export const transformationsApi = {
@@ -35,6 +40,23 @@ export const transformationsApi = {
 
   execute: async (data: ExecuteTransformationRequest) => {
     const response = await apiClient.post<ExecuteTransformationResponse>('/transformations/execute', data)
+    return response.data
+  },
+
+  preview: async (data: PreviewTransformationRequest) => {
+    const response = await apiClient.post<PreviewTransformationResponse>('/transformations/preview', data)
+    return response.data
+  },
+
+  estimateCost: async (data: EstimateTransformationCostRequest) => {
+    const response = await apiClient.post<EstimateTransformationCostResponse>('/transformations/estimate-cost', data)
+    return response.data
+  },
+
+  getResultHistory: async (transformationId: string, sourceId: string) => {
+    const response = await apiClient.get<TransformationResultHistory>(
+      `/transformations/${transformationId}/results/${sourceId}`
+    )
     return response.data
   },
 

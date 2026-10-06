@@ -1,0 +1,5 @@
+-- Migration 29 rollback: drop the transformation-result versioning seed
+-- fields added to source_insight.
+
+REMOVE FIELD IF EXISTS transformation ON TABLE source_insight;
+REMOVE FIELD IF EXISTS version ON TABLE source_insight;

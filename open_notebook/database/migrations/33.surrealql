@@ -1,0 +1,17 @@
+-- Migration 33: Usage event idempotency key (P2 "Modelos, costo y confianza")
+--
+-- Each usage_event row written by UsageTrackingCallbackHandler
+-- (open_notebook/ai/provision.py) now carries the attempt_id of the
+-- specific model-invocation attempt that produced it, so a real retry
+-- (its own attempt, its own cost) is traceable and distinguishable from an
+-- accidental application-level double-write of the same completed
+-- response (which attempt_id would reveal as an improbable duplicate).
+--
+-- Purely additive: existing rows keep attempt_id = NONE (unknown attempt -
+-- written before this migration), nothing else changes.
+--
+-- Budget settings (daily_budget_usd / monthly_budget_usd) live on the
+-- SCHEMALESS open_notebook:content_settings record (see migration 23's
+-- comment) and need no DEFINE FIELD here.
+
+DEFINE FIELD IF NOT EXISTS attempt_id ON TABLE usage_event TYPE option<string>;

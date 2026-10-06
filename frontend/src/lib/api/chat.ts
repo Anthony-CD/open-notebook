@@ -8,6 +8,7 @@ import {
   NotebookChatMessage,
   BuildContextRequest,
   BuildContextResponse,
+  MessageFeedbackRequest,
 } from '@/lib/types/api'
 
 export const chatApi = {
@@ -62,6 +63,18 @@ export const chatApi = {
   buildContext: async (data: BuildContextRequest) => {
     const response = await apiClient.post<BuildContextResponse>(
       `/chat/context`,
+      data
+    )
+    return response.data
+  },
+
+  setMessageFeedback: async (
+    sessionId: string,
+    messageId: string,
+    data: MessageFeedbackRequest
+  ) => {
+    const response = await apiClient.put<{ success: boolean; message: string }>(
+      `/chat/sessions/${sessionId}/messages/${messageId}/feedback`,
       data
     )
     return response.data

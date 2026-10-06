@@ -10,7 +10,9 @@ import {
   UpdateSourceRequest,
   SourceResponse,
   SourceStatusResponse,
-  SourceListResponse
+  SourceListResponse,
+  SourceDeletePreview,
+  SourceUploadLimits
 } from '@/lib/types/api'
 
 const NOTEBOOK_SOURCES_PAGE_SIZE = 30
@@ -283,6 +285,101 @@ export function useRetrySource() {
       toast({
         title: t('common.error'),
         description: getApiErrorMessage(error, (key) => t(key), t('sources.failedToRetry')),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
+export function useArchiveSource() {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: (sourceId: string) => sourcesApi.archive(sourceId),
+    onSuccess: (_, sourceId) => {
+      queryClient.invalidateQueries({ queryKey: ['sources'] })
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.source(sourceId) })
+      toast({
+        title: t('sources.archiveSuccess'),
+      })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: t('common.error'),
+        description: getApiErrorMessage(error, (key) => t(key), t('sources.failedToArchive')),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
+export function useUnarchiveSource() {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: (sourceId: string) => sourcesApi.unarchive(sourceId),
+    onSuccess: (_, sourceId) => {
+      queryClient.invalidateQueries({ queryKey: ['sources'] })
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.source(sourceId) })
+      toast({
+        title: t('sources.unarchiveSuccess'),
+      })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: t('common.error'),
+        description: getApiErrorMessage(error, (key) => t(key), t('sources.failedToUnarchive')),
+        variant: 'destructive',
+      })
+    },
+  })
+}
+
+export function useSourceDeletePreview(sourceId: string, enabled = true) {
+  return useQuery<SourceDeletePreview>({
+    queryKey: ['sources', sourceId, 'delete-preview'],
+    queryFn: () => sourcesApi.deletePreview(sourceId),
+    enabled: !!sourceId && enabled,
+    staleTime: 0,
+  })
+}
+
+export function useSourceUploadLimits() {
+  return useQuery<SourceUploadLimits>({
+    queryKey: ['sources', 'limits'],
+    queryFn: () => sourcesApi.limits(),
+    staleTime: 10 * 60 * 1000, // config-like value, rarely changes within a session
+  })
+}
+
+export function useReplaceSource() {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const { t } = useTranslation()
+
+  return useMutation({
+    mutationFn: ({
+      id,
+      data,
+    }: {
+      id: string
+      data: { type: 'link' | 'upload' | 'text'; url?: string; content?: string; file?: File; delete_source?: boolean }
+    }) => sourcesApi.replace(id, data),
+    onSuccess: (_, { id }) => {
+      queryClient.invalidateQueries({ queryKey: ['sources'] })
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.source(id) })
+      toast({
+        title: t('sources.replaceSuccess'),
+      })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: t('common.error'),
+        description: getApiErrorMessage(error, (key) => t(key), t('sources.failedToReplace')),
         variant: 'destructive',
       })
     },

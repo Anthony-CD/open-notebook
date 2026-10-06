@@ -126,15 +126,21 @@ async def test_delete_chat_session_missing_returns_404(mock_get, client):
 
 
 @pytest.mark.asyncio
+@patch("api.routers._chat_shared.repo_query", new_callable=AsyncMock)
 @patch("api.routers.chat.repo_query", new_callable=AsyncMock)
 @patch("api.routers.chat.chat_graph")
 @patch("api.routers.chat.ChatSession.get", new_callable=AsyncMock)
-async def test_get_chat_session_message_shapes(mock_get, mock_graph, mock_repo, client):
+async def test_get_chat_session_message_shapes(
+    mock_get, mock_graph, mock_repo, mock_shared_repo, client
+):
     mock_get.return_value = _session()
     mock_graph.get_state.return_value = _graph_state(
         {"messages": [_Msg("m1", "human", "hello"), _Msg("m2", "ai", "hi"), _Bare()]}
     )
     mock_repo.return_value = [{"out": "notebook:1"}]
+    # get_feedback_map() queries chat_feedback via _chat_shared's own
+    # repo_query binding - no ratings stored for this session.
+    mock_shared_repo.return_value = []
 
     resp = client.get("/api/chat/sessions/abc")
 
@@ -146,6 +152,8 @@ async def test_get_chat_session_message_shapes(mock_get, mock_graph, mock_repo, 
         "type": "human",
         "content": "hello",
         "timestamp": None,
+        "citations": None,
+        "feedback": None,
     }
     assert body["messages"][1]["type"] == "ai"
     # Object without type/content falls back to "unknown" / str(msg); the id
@@ -155,6 +163,8 @@ async def test_get_chat_session_message_shapes(mock_get, mock_graph, mock_repo, 
         "type": "unknown",
         "content": "bare-repr",
         "timestamp": None,
+        "citations": None,
+        "feedback": None,
     }
 
 
@@ -318,12 +328,16 @@ async def test_get_source_chat_session_happy_path_shapes(
         "type": "human",
         "content": "hello",
         "timestamp": None,
+        "citations": None,
+        "feedback": None,
     }
     assert body["messages"][1] == {
         "id": "msg_1",
         "type": "unknown",
         "content": "bare-repr",
         "timestamp": None,
+        "citations": None,
+        "feedback": None,
     }
     assert body["context_indicators"] == {
         "sources": ["source:xyz"],

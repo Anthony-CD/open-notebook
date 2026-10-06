@@ -1,13 +1,17 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
 import { getDateLocale } from '@/lib/utils/date-locale'
-import { InfoIcon, RefreshCcw, Trash2 } from 'lucide-react'
+import { InfoIcon, RefreshCcw, Star, Tag as TagIcon, Trash2, X as XIcon, Ban } from 'lucide-react'
 
-import apiClient from '@/lib/api/client'
-import { resolvePodcastAssetUrl } from '@/lib/api/podcasts'
-import { EpisodeStatus, FAILED_EPISODE_STATUSES, PodcastEpisode } from '@/lib/types/podcasts'
+import {
+  CANCELABLE_EPISODE_STATUSES,
+  EpisodeStatus,
+  FAILED_EPISODE_STATUSES,
+  PodcastEpisode,
+} from '@/lib/types/podcasts'
+import { useCancelPodcastJob, useUpdateEpisodeOrganization } from '@/lib/hooks/use-podcasts'
 import { cn } from '@/lib/utils'
 import {
   AlertDialog,
@@ -31,8 +35,10 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { PodcastAudioPlayer } from './PodcastAudioPlayer'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import type { TFunction } from 'i18next'
 
@@ -75,6 +81,14 @@ const getSTATUS_META = (t: TFunction): Record<
   submitted: {
     label: t('podcasts.pendingLabel'),
     className: 'bg-teal-tint text-teal border-teal/30',
+  },
+  queued: {
+    label: t('podcasts.pendingLabel'),
+    className: 'bg-teal-tint text-teal border-teal/30',
+  },
+  canceled: {
+    label: t('podcasts.canceledLabel'),
+    className: 'bg-muted text-muted-foreground border-transparent',
   },
   unknown: {
     label: t('common.unknown'),
@@ -155,51 +169,40 @@ function extractTranscriptEntries(transcript: unknown): TranscriptEntry[] {
 
 export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: EpisodeCardProps) {
   const { t, language } = useTranslation()
-  const [audioSrc, setAudioSrc] = useState<string | undefined>()
-  const [audioError, setAudioError] = useState<string | null>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const [tagInput, setTagInput] = useState('')
+
+  const cancelJob = useCancelPodcastJob()
+  const updateOrganization = useUpdateEpisodeOrganization()
 
   const outlineSegments = useMemo(() => extractOutlineSegments(episode.outline), [episode.outline])
   const transcriptEntries = useMemo(() => extractTranscriptEntries(episode.transcript), [episode.transcript])
 
-  useEffect(() => {
-    let revokeUrl: string | undefined
-    setAudioError(null)
+  const handleToggleFavorite = () => {
+    updateOrganization.mutate({
+      episodeId: episode.id,
+      payload: { favorited: !episode.favorited },
+    })
+  }
 
-    // If backend exposed a protected endpoint, fetch it with auth headers
-    const loadProtectedAudio = async () => {
-      // First resolve the audio URL
-      const directAudioUrl = await resolvePodcastAssetUrl(episode.audio_url ?? episode.audio_file)
+  const handleAddTag = () => {
+    const cleaned = tagInput.trim()
+    if (!cleaned) return
+    const nextTags = Array.from(new Set([...(episode.tags ?? []), cleaned]))
+    updateOrganization.mutate({ episodeId: episode.id, payload: { tags: nextTags } })
+    setTagInput('')
+  }
 
-      if (!directAudioUrl || !episode.audio_url) {
-        setAudioSrc(directAudioUrl)
-        return
-      }
+  const handleRemoveTag = (tag: string) => {
+    const nextTags = (episode.tags ?? []).filter((existing) => existing !== tag)
+    updateOrganization.mutate({ episodeId: episode.id, payload: { tags: nextTags } })
+  }
 
-      try {
-        // apiClient attaches the auth header; directAudioUrl is absolute so
-        // the dynamic baseURL is ignored.
-        const response = await apiClient.get<Blob>(directAudioUrl, {
-          responseType: 'blob',
-        })
-
-        revokeUrl = URL.createObjectURL(response.data)
-        setAudioSrc(revokeUrl)
-      } catch (error) {
-        console.error('Unable to load podcast audio', error)
-        setAudioError(t('podcasts.audioUnavailable'))
-        setAudioSrc(undefined)
-      }
+  const handleCancelJob = () => {
+    if (episode.command_id) {
+      cancelJob.mutate(episode.command_id)
     }
-
-    void loadProtectedAudio()
-
-    return () => {
-      if (revokeUrl) {
-        URL.revokeObjectURL(revokeUrl)
-      }
-    }
-  }, [episode.audio_url, episode.audio_file, t])
+  }
 
   const distance = episode.created
     ? formatDistanceToNow(new Date(episode.created), {
@@ -223,6 +226,9 @@ export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: 
   }
 
   const isFailed = FAILED_EPISODE_STATUSES.includes(episode.job_status as EpisodeStatus)
+  const isCancelable = CANCELABLE_EPISODE_STATUSES.includes(
+    episode.job_status as EpisodeStatus
+  )
 
   return (
     <Card>
@@ -230,10 +236,40 @@ export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={handleToggleFavorite}
+                disabled={updateOrganization.isPending}
+                title={episode.favorited ? t('podcasts.unfavorite') : t('podcasts.favorite')}
+                aria-pressed={!!episode.favorited}
+              >
+                <Star
+                  className={cn(
+                    'h-4 w-4',
+                    episode.favorited ? 'fill-warn text-warn' : 'text-muted-foreground'
+                  )}
+                />
+              </Button>
               <h3 className="text-base font-semibold text-foreground">
                 {episode.name}
               </h3>
               <StatusBadge status={episode.job_status} />
+              {episode.tags?.map((tag) => (
+                <Badge key={tag} variant="secondary" className="gap-1 text-[10px]">
+                  <TagIcon className="h-2.5 w-2.5" />
+                  {tag}
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveTag(tag)}
+                    aria-label={t('podcasts.removeTag', { tag })}
+                    className="ml-0.5 rounded-full hover:text-destructive"
+                  >
+                    <XIcon className="h-2.5 w-2.5" />
+                  </button>
+                </Badge>
+              ))}
             </div>
             <p className="text-xs text-muted-foreground">
               {t('podcasts.profile')}: {episode.episode_profile?.name || t('common.unknown')}
@@ -241,6 +277,30 @@ export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: 
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {isCancelable && episode.command_id ? (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline" size="sm" disabled={cancelJob.isPending}>
+                    <Ban className="mr-2 h-4 w-4" />
+                    {t('podcasts.cancelJob')}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t('podcasts.cancelJobConfirmTitle')}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t('podcasts.cancelJobConfirmDesc')}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+                    <AlertDialogAction onClick={handleCancelJob}>
+                      {t('podcasts.cancelJob')}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            ) : null}
             <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
               <DialogTrigger asChild>
                 <Button variant="outline" size="sm">
@@ -256,12 +316,8 @@ export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: 
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 overflow-hidden">
-                  {audioSrc ? (
-                    <div className="rounded-md border bg-card p-2">
-                      <audio controls preload="none" src={audioSrc} className="w-full" />
-                    </div>
-                  ) : audioError ? (
-                    <p className="text-sm text-destructive">{audioError}</p>
+                  {episode.audio_file || episode.audio_url ? (
+                    <PodcastAudioPlayer episode={episode} />
                   ) : null}
 
                   <Tabs defaultValue="summary" className="h-[60vh] flex flex-col">
@@ -350,6 +406,69 @@ export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: 
                               </div>
                             </section>
                           ) : null}
+
+                          <section className="space-y-2">
+                            <h4 className="text-sm font-semibold text-foreground">
+                              {t('podcasts.contentSourcesTitle')}
+                            </h4>
+                            <p className="text-xs text-muted-foreground">
+                              {t('podcasts.contentSourcesDesc')}
+                            </p>
+                            {episode.content_notebooks && episode.content_notebooks.length > 0 ? (
+                              <div className="flex flex-wrap gap-1.5">
+                                {episode.content_notebooks.map((name) => (
+                                  <Badge key={name} variant="outline" className="text-[10px]">
+                                    {name}
+                                  </Badge>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">
+                                {t('podcasts.noContentSourcesInfo')}
+                              </p>
+                            )}
+                          </section>
+
+                          <section className="space-y-2">
+                            <h4 className="text-sm font-semibold text-foreground">{t('podcasts.tagsLabel')}</h4>
+                            <div className="flex flex-wrap gap-1.5">
+                              {(episode.tags ?? []).length === 0 ? (
+                                <span className="text-xs text-muted-foreground">{t('podcasts.noTags')}</span>
+                              ) : (
+                                episode.tags?.map((tag) => (
+                                  <Badge key={tag} variant="secondary" className="gap-1 text-[10px]">
+                                    <TagIcon className="h-2.5 w-2.5" />
+                                    {tag}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveTag(tag)}
+                                      aria-label={t('podcasts.removeTag', { tag })}
+                                      className="ml-0.5 rounded-full hover:text-destructive"
+                                    >
+                                      <XIcon className="h-2.5 w-2.5" />
+                                    </button>
+                                  </Badge>
+                                ))
+                              )}
+                            </div>
+                            <div className="flex gap-2">
+                              <Input
+                                value={tagInput}
+                                onChange={(e) => setTagInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault()
+                                    handleAddTag()
+                                  }
+                                }}
+                                placeholder={t('podcasts.addTagPlaceholder')}
+                                className="h-8 text-xs"
+                              />
+                              <Button size="sm" variant="outline" onClick={handleAddTag}>
+                                {t('podcasts.tagsLabel')}
+                              </Button>
+                            </div>
+                          </section>
                         </div>
                       </ScrollArea>
                     </TabsContent>
@@ -395,15 +514,28 @@ export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: 
               </DialogContent>
             </Dialog>
             {isFailed && onRetry ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRetry}
-                disabled={retrying}
-              >
-                <RefreshCcw className={cn('mr-2 h-4 w-4', retrying && 'animate-spin')} />
-                {retrying ? t('podcasts.retrying') : t('podcasts.retry')}
-              </Button>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline" size="sm" disabled={retrying}>
+                    <RefreshCcw className={cn('mr-2 h-4 w-4', retrying && 'animate-spin')} />
+                    {retrying ? t('podcasts.retrying') : t('podcasts.retry')}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t('podcasts.retryConfirmTitle')}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t('podcasts.retryConfirmDesc')}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+                    <AlertDialogAction onClick={handleRetry}>
+                      {t('podcasts.retryConfirmAction')}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             ) : null}
             <AlertDialog>
               <AlertDialogTrigger asChild>
@@ -430,12 +562,8 @@ export function EpisodeCard({ episode, onDelete, deleting, onRetry, retrying }: 
           </div>
         </div>
 
-        {audioSrc ? (
-          <div className="rounded-md border bg-card p-2">
-            <audio controls preload="none" src={audioSrc} className="w-full" />
-          </div>
-        ) : audioError ? (
-          <p className="text-sm text-destructive">{audioError}</p>
+        {episode.audio_file || episode.audio_url ? (
+          <PodcastAudioPlayer episode={episode} />
         ) : null}
 
         {isFailed && episode.error_message ? (

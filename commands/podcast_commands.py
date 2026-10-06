@@ -1,11 +1,14 @@
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
+from langchain_core.exceptions import OutputParserException
 from loguru import logger
+from pydantic import ValidationError
 from surreal_commands import CommandInput, CommandOutput, command
 
+from open_notebook.ai.models import DefaultModels
 from open_notebook.config import PODCASTS_FOLDER
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.podcasts.audio_paths import to_relative_audio_path
@@ -22,6 +25,26 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import podcast_creator: {e}")
     raise ValueError("podcast_creator library not available")
+
+# Cap on how many configured large-context fallback models podcast
+# generation will try (on top of the primary model) before giving up. Book-
+# length content makes each attempt slow and potentially costly (a big
+# model call against 700k+ chars), so an unbounded walk through a long
+# user-configured fallback chain risks a single episode running for hours.
+# 3 gives a meaningful safety net (primary + 3 fallbacks = 4 total tries)
+# without that risk; any extra configured fallbacks beyond this are logged
+# and skipped rather than silently ignored.
+MAX_PODCAST_FALLBACK_ATTEMPTS = 3
+
+# Exception types that are technically ValueError subclasses but represent
+# a model producing malformed/unparseable output rather than a permanent
+# config problem - see the long comment above the attempts loop below for
+# why these must NOT take the "permanent failure, never fall back" path.
+# Both were hit live: pydantic.ValidationError when a fallback model's
+# structured output failed schema validation, and OutputParserException
+# ("Invalid json output: ...") when a model's JSON response couldn't be
+# parsed at all.
+_TRANSIENT_MODEL_OUTPUT_ERRORS = (ValidationError, OutputParserException)
 
 
 def build_episode_output_dir(podcasts_folder: str = PODCASTS_FOLDER) -> tuple[str, Path]:
@@ -218,21 +241,37 @@ async def generate_podcast_command(
         # Remove profiles that fail resolution to prevent validation errors.
         for sp_name in list(speaker_profiles_dict.keys()):
             sp_dict = speaker_profiles_dict[sp_name]
-            if sp_dict.get("voice_model"):
-                try:
-                    prov, model, conf = await _resolve_model_config(
-                        str(sp_dict["voice_model"])
-                    )
-                    sp_dict["tts_provider"] = prov
-                    sp_dict["tts_model"] = model
-                    sp_dict["tts_config"] = conf
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to resolve TTS for speaker profile '{sp_name}', "
-                        f"removing from config to prevent validation errors: {e}"
-                    )
-                    del speaker_profiles_dict[sp_name]
-                    continue
+            if not sp_dict.get("voice_model"):
+                # podcast-creator's SpeakerProfile requires tts_provider/
+                # tts_model with no default (unlike EpisodeProfile's
+                # outline/transcript fields, which have hardcoded defaults) -
+                # an unconfigured voice_model here is not a resolution
+                # *failure*, it was simply never set (default seed data), so
+                # there's nothing to try/except. Drop it the same way a
+                # failed resolution is dropped below, or podcast-creator's
+                # own SpeakerConfig validation crashes on this profile even
+                # though it's unrelated to the episode being generated.
+                logger.warning(
+                    f"Speaker profile '{sp_name}' has no voice model "
+                    "configured, removing from config to prevent validation "
+                    "errors"
+                )
+                del speaker_profiles_dict[sp_name]
+                continue
+            try:
+                prov, model, conf = await _resolve_model_config(
+                    str(sp_dict["voice_model"])
+                )
+                sp_dict["tts_provider"] = prov
+                sp_dict["tts_model"] = model
+                sp_dict["tts_config"] = conf
+            except Exception as e:
+                logger.warning(
+                    f"Failed to resolve TTS for speaker profile '{sp_name}', "
+                    f"removing from config to prevent validation errors: {e}"
+                )
+                del speaker_profiles_dict[sp_name]
+                continue
 
             # Per-speaker TTS overrides
             for speaker in sp_dict.get("speakers", []):
@@ -283,9 +322,8 @@ async def generate_podcast_command(
         # fixed, developer-authored template with the user text passed in
         # as a plain variable instead, matching transformation.py's fix.
         configure("speakers_config", {"profiles": speaker_profiles_dict})
-        configure("episode_config", {"profiles": episode_profiles_dict})
 
-        logger.info("Configured podcast-creator with episode and speaker profiles")
+        logger.info("Configured podcast-creator with speaker profiles")
 
         logger.info(f"Generated briefing (length: {len(briefing)} chars)")
 
@@ -295,17 +333,184 @@ async def generate_podcast_command(
 
         logger.info(f"Created output directory: {output_dir}")
 
-        # 8. Generate podcast using podcast-creator
+        # 8. Build the ordered list of model attempts: attempt 0 is the
+        # already-resolved primary outline/transcript config (today's only
+        # attempt), attempts 1..N re-resolve each configured large-context
+        # fallback model (Settings -> Models -> large context fallback
+        # chain) through the same _resolve_model_config() helper and use
+        # that SAME model for both outline and transcript stages - a
+        # book-sized-context failure (hang, overload, deprecation) affects
+        # both stages identically, so there's no benefit in mixing per-role
+        # fallback models here. With no fallback chain configured (the
+        # common case), this list has exactly one entry and behavior below
+        # is unchanged from before this feature existed.
+        # NOTE: outline_provider/transcript_provider (and their model/config
+        # siblings) are only present on primary_ep_dict when the profile row
+        # actually had outline_llm/transcript_llm set (step 5's `if
+        # ep_dict.get("outline_llm"):` guard) - a row missing that field
+        # (e.g. seeded before the model registry existed) intentionally
+        # leaves these keys unset so podcast-creator falls back to its own
+        # hardcoded default model. `.get()` (not `[...]`) preserves that:
+        # the "primary" attempt just carries (None, None, None) for that
+        # role, and the per-attempt loop below skips overwriting it.
+        primary_ep_dict = episode_profiles_dict[episode_profile.name]
+        attempts: List[Dict[str, Any]] = [
+            {
+                "label": (
+                    f"primary ({primary_ep_dict.get('outline_provider')}/"
+                    f"{primary_ep_dict.get('outline_model')})"
+                ),
+                "outline": (
+                    primary_ep_dict.get("outline_provider"),
+                    primary_ep_dict.get("outline_model"),
+                    primary_ep_dict.get("outline_config"),
+                ),
+                "transcript": (
+                    primary_ep_dict.get("transcript_provider"),
+                    primary_ep_dict.get("transcript_model"),
+                    primary_ep_dict.get("transcript_config"),
+                ),
+            }
+        ]
+
+        try:
+            default_models = await DefaultModels.get_instance()
+            fallback_model_ids = list(default_models.large_context_fallback_models or [])
+        except Exception as e:
+            logger.warning(
+                f"Failed to load large-context fallback model chain for podcast "
+                f"generation, proceeding with the primary model only: {e}"
+            )
+            fallback_model_ids = []
+
+        if len(fallback_model_ids) > MAX_PODCAST_FALLBACK_ATTEMPTS:
+            logger.info(
+                f"{len(fallback_model_ids)} large-context fallback models "
+                f"configured; capping podcast generation at the first "
+                f"{MAX_PODCAST_FALLBACK_ATTEMPTS} to bound total runtime/cost "
+                "against book-length content."
+            )
+            fallback_model_ids = fallback_model_ids[:MAX_PODCAST_FALLBACK_ATTEMPTS]
+
+        for fallback_model_id in fallback_model_ids:
+            try:
+                fb_provider, fb_model_name, fb_config = await _resolve_model_config(
+                    fallback_model_id, max_tokens=episode_profile.max_tokens
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to resolve fallback model '{fallback_model_id}' for "
+                    f"podcast generation, skipping it: {e}"
+                )
+                continue
+            attempts.append(
+                {
+                    "label": f"fallback ({fb_provider}/{fb_model_name})",
+                    "outline": (fb_provider, fb_model_name, fb_config),
+                    "transcript": (fb_provider, fb_model_name, fb_config),
+                }
+            )
+
+        # 9. Generate podcast using podcast-creator, walking the attempts
+        # list in order. A ValueError raised directly by podcast-creator's
+        # own config validation (bad speaker/episode profile, missing
+        # briefing, etc. - see its config.py/episodes.py/speakers.py) is a
+        # permanent failure no fallback model can fix, and propagates
+        # immediately. _TRANSIENT_MODEL_OUTPUT_ERRORS are technically also
+        # ValueError subclasses but mean something different here: the
+        # outline/transcript model returned malformed, empty, or unparseable
+        # output (observed live - a pydantic.ValidationError from "Failed to
+        # parse ValidatedTranscript from completion null" when a fallback
+        # model choked mid-overload, and separately a LangChain
+        # OutputParserException's "Invalid json output: ..." from a model
+        # that didn't return clean JSON for the outline) - that's exactly
+        # what the fallback chain exists to route around, so these take the
+        # normal attempt/fallback path below instead of short-circuiting the
+        # whole job on one flaky response.
+        # Any other exception also moves on to the next attempt; when every
+        # attempt is exhausted the last error is raised (unchanged, single-
+        # attempt propagation when no fallback is configured; a summarizing
+        # RuntimeError when there were fallbacks to report on).
         logger.info("Starting podcast generation with podcast-creator...")
 
-        result = await create_podcast(
-            content=input_data.content,
-            briefing=briefing,
-            episode_name=episode_dir_name,
-            output_dir=str(output_dir),
-            speaker_config=speaker_profile.name,
-            episode_profile=episode_profile.name,
-        )
+        result = None
+        attempt_errors: List[str] = []
+        for i, attempt in enumerate(attempts):
+            o_provider, o_model, o_config = attempt["outline"]
+            t_provider, t_model, t_config = attempt["transcript"]
+            ep_dict = episode_profiles_dict[episode_profile.name]
+            # Only overwrite a role's provider/model/config when this attempt
+            # actually resolved one - an unresolved primary role (see NOTE
+            # above) is left untouched so podcast-creator's own default
+            # keeps applying to it, exactly as before this feature existed.
+            if o_provider is not None:
+                ep_dict["outline_provider"] = o_provider
+                ep_dict["outline_model"] = o_model
+                ep_dict["outline_config"] = o_config
+            if t_provider is not None:
+                ep_dict["transcript_provider"] = t_provider
+                ep_dict["transcript_model"] = t_model
+                ep_dict["transcript_config"] = t_config
+            configure("episode_config", {"profiles": episode_profiles_dict})
+
+            logger.info(
+                f"Podcast generation attempt {i + 1}/{len(attempts)}: "
+                f"{attempt['label']}"
+            )
+            try:
+                result = await create_podcast(
+                    content=input_data.content,
+                    briefing=briefing,
+                    episode_name=episode_dir_name,
+                    output_dir=str(output_dir),
+                    speaker_config=speaker_profile.name,
+                    episode_profile=episode_profile.name,
+                )
+                logger.info(
+                    f"Podcast generation succeeded on attempt {i + 1}/{len(attempts)} "
+                    f"using {attempt['label']}"
+                )
+                break
+            except ValueError as e:
+                if not isinstance(e, _TRANSIENT_MODEL_OUTPUT_ERRORS):
+                    # Permanent failure - never retried with a fallback model.
+                    raise
+                logger.warning(
+                    f"Podcast generation attempt {i + 1}/{len(attempts)} failed "
+                    f"using {attempt['label']} (model returned invalid output): {e}"
+                )
+                attempt_errors.append(f"{attempt['label']}: {e}")
+                if i == len(attempts) - 1:
+                    if len(attempts) == 1:
+                        raise
+                    raise RuntimeError(
+                        f"Podcast generation failed after {len(attempts)} "
+                        "attempts: " + " | ".join(attempt_errors)
+                    ) from e
+            except Exception as e:
+                logger.warning(
+                    f"Podcast generation attempt {i + 1}/{len(attempts)} failed "
+                    f"using {attempt['label']}: {e}"
+                )
+                attempt_errors.append(f"{attempt['label']}: {e}")
+                if i == len(attempts) - 1:
+                    if len(attempts) == 1:
+                        # No fallback chain configured: preserve today's
+                        # exact error propagation, unchanged (strict
+                        # no-regression case - see class docstring/AGENTS.md).
+                        raise
+                    raise RuntimeError(
+                        f"Podcast generation failed after {len(attempts)} "
+                        "attempts: " + " | ".join(attempt_errors)
+                    ) from e
+
+        # Every failure path above (ValueError re-raise, single-attempt
+        # re-raise, or the summarizing RuntimeError on the last attempt)
+        # exits the function before reaching here, so `result` is always
+        # set by this point - this only narrows the type for mypy (`result`
+        # is seeded to None above so the loop can be typed) without
+        # changing runtime behavior.
+        assert result is not None
 
         # podcast-creator reports audio-combination failures IN-BAND: on
         # ffmpeg/clip errors combine_audio_files() returns an "ERROR: ..."

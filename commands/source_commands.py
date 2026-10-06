@@ -8,7 +8,20 @@ from surreal_commands import CommandInput, CommandOutput, command
 from open_notebook.database.repository import ensure_record_id
 from open_notebook.domain.notebook import Source
 from open_notebook.domain.transformation import Transformation
-from open_notebook.exceptions import ConfigurationError
+from open_notebook.exceptions import (
+    AuthenticationError,
+    ConfigurationError,
+    NotFoundError,
+)
+
+# Exceptions that retrying can never fix: a bad/revoked API key doesn't
+# become valid, and a record that doesn't exist won't appear, no matter how
+# many of the up-to-15 exponential-backoff attempts (up to 120s apart) run.
+# Confirmed live (2026-10-06 QA pass): a source stuck on a stale credential
+# retried ~8 times over several minutes before this fix, each attempt
+# re-running extraction/embedding for nothing - `run_transformation` raises
+# the same AuthenticationError via the same transform_graph.ainvoke() call.
+_PERMANENT_FAILURE_TYPES = (AuthenticationError, ConfigurationError, NotFoundError, ValueError)
 
 try:
     from open_notebook.graphs.source import source_graph
@@ -43,7 +56,7 @@ class SourceProcessingOutput(CommandOutput):
         "wait_strategy": "exponential_jitter",
         "wait_min": 1,
         "wait_max": 120,  # Allow queue to drain
-        "stop_on": [ValueError, ConfigurationError],  # Don't retry validation/config errors
+        "stop_on": _PERMANENT_FAILURE_TYPES,  # Don't retry validation/config/auth/not-found errors
         "retry_log_level": "debug",  # Avoid log noise during transaction conflicts
     },
 )
@@ -176,7 +189,7 @@ class RunTransformationOutput(CommandOutput):
         "wait_strategy": "exponential_jitter",
         "wait_min": 1,
         "wait_max": 60,
-        "stop_on": [ValueError, ConfigurationError],  # Don't retry validation/config errors
+        "stop_on": _PERMANENT_FAILURE_TYPES,  # Don't retry validation/config/auth/not-found errors
         "retry_log_level": "debug",
     },
 )
@@ -197,7 +210,9 @@ async def run_transformation_command(
     Retry Strategy:
     - Retries up to 5 times for transient failures (network, timeout, etc.)
     - Uses exponential-jitter backoff (1-60s)
-    - Does NOT retry permanent failures (ValueError for validation errors)
+    - Does NOT retry permanent failures (validation, config, auth, not-found -
+      see _PERMANENT_FAILURE_TYPES; a bad API key or a missing record will
+      never succeed just by waiting and trying again)
     """
     start_time = time.time()
 

@@ -21,6 +21,7 @@ from open_notebook.ai.model_discovery import (
     sync_all_providers,
     sync_provider_models,
 )
+from open_notebook.ai.model_metadata import get_model_metadata
 from open_notebook.ai.models import DefaultModels, Model
 from open_notebook.domain.credential import Credential
 from open_notebook.exceptions import (
@@ -170,6 +171,43 @@ def _check_openai_compatible_support(mode: str) -> bool:
     return generic or specific or generic_key or specific_key
 
 
+async def _model_response_with_metadata(model: Model) -> ModelResponse:
+    """Build a ModelResponse, enriched with honest best-effort metadata.
+
+    Only language models get a metadata lookup - context window/vision/
+    tool-use are only meaningful for the chat/transformation model picker
+    (see open_notebook/ai/model_metadata.py for exactly what's known vs.
+    left honestly blank).
+    """
+    context_window = None
+    capabilities: List[str] = []
+    capabilities_known = False
+    metadata_source = None
+    if model.type == "language":
+        try:
+            metadata = await get_model_metadata(model.provider, model.name)
+            context_window = metadata.context_window
+            capabilities = list(metadata.capabilities)
+            capabilities_known = metadata.capabilities_known
+            metadata_source = metadata.source if metadata.source != "unknown" else None
+        except Exception as e:
+            logger.warning(f"Failed to resolve metadata for model {model.id}: {e}")
+
+    return ModelResponse(
+        id=model.id or "",
+        name=model.name,
+        provider=model.provider,
+        type=model.type,
+        credential=model.credential,
+        created=str(model.created),
+        updated=str(model.updated),
+        context_window=context_window,
+        capabilities=capabilities,
+        capabilities_known=capabilities_known,
+        metadata_source=metadata_source,
+    )
+
+
 @router.get("/models", response_model=List[ModelResponse])
 async def get_models(
     type: Optional[str] = Query(None, description="Filter by model type"),
@@ -181,18 +219,7 @@ async def get_models(
         else:
             models = await Model.get_all()
 
-        return [
-            ModelResponse(
-                id=model.id,
-                name=model.name,
-                provider=model.provider,
-                type=model.type,
-                credential=model.credential,
-                created=str(model.created),
-                updated=str(model.updated),
-            )
-            for model in models
-        ]
+        return [await _model_response_with_metadata(model) for model in models]
     except HTTPException:
         raise
     except OpenNotebookError:
@@ -318,6 +345,13 @@ async def get_default_models():
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
             default_embedding_model=defaults.default_embedding_model,  # type: ignore[attr-defined]
             default_tools_model=defaults.default_tools_model,  # type: ignore[attr-defined]
+            chat_fallback_models=defaults.chat_fallback_models,  # type: ignore[attr-defined]
+            transformation_fallback_models=defaults.transformation_fallback_models,  # type: ignore[attr-defined]
+            large_context_fallback_models=defaults.large_context_fallback_models,  # type: ignore[attr-defined]
+            tools_fallback_models=defaults.tools_fallback_models,  # type: ignore[attr-defined]
+            embedding_fallback_models=defaults.embedding_fallback_models,  # type: ignore[attr-defined]
+            text_to_speech_fallback_models=defaults.text_to_speech_fallback_models,  # type: ignore[attr-defined]
+            speech_to_text_fallback_models=defaults.speech_to_text_fallback_models,  # type: ignore[attr-defined]
         )
     except HTTPException:
         raise
@@ -372,6 +406,13 @@ async def update_default_models(defaults_data: DefaultModelsResponse):
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
             default_embedding_model=defaults.default_embedding_model,  # type: ignore[attr-defined]
             default_tools_model=defaults.default_tools_model,  # type: ignore[attr-defined]
+            chat_fallback_models=defaults.chat_fallback_models,  # type: ignore[attr-defined]
+            transformation_fallback_models=defaults.transformation_fallback_models,  # type: ignore[attr-defined]
+            large_context_fallback_models=defaults.large_context_fallback_models,  # type: ignore[attr-defined]
+            tools_fallback_models=defaults.tools_fallback_models,  # type: ignore[attr-defined]
+            embedding_fallback_models=defaults.embedding_fallback_models,  # type: ignore[attr-defined]
+            text_to_speech_fallback_models=defaults.text_to_speech_fallback_models,  # type: ignore[attr-defined]
+            speech_to_text_fallback_models=defaults.speech_to_text_fallback_models,  # type: ignore[attr-defined]
         )
     except HTTPException:
         raise

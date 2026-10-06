@@ -42,6 +42,15 @@ class SearchRequest(BaseModel):
     limit: int = Field(100, description="Maximum number of results", ge=1, le=1000)
     search_sources: bool = Field(True, description="Include sources in search")
     search_notes: bool = Field(True, description="Include notes in search")
+    search_chats: bool = Field(
+        True,
+        description=(
+            "Include chat conversation messages. Unlike sources/notes this is "
+            "always a plain case-insensitive substring match (chat history "
+            "lives outside SurrealDB, in the LangGraph checkpoint store, with "
+            "no full-text/vector index of its own) - not affected by `type`."
+        ),
+    )
     minimum_score: float = Field(
         0.2, description="Minimum score for vector search", ge=0, le=1
     )
@@ -60,9 +69,40 @@ class AskRequest(BaseModel):
     final_answer_model: str = Field(..., description="Model ID for final answer")
 
 
+class Citation(BaseModel):
+    """One structured citation backing a `[n]` marker in a chat/ask answer.
+
+    Built from what was actually retrieved for the turn (never derived from
+    the raw answer text), so the frontend can render a clickable chip without
+    re-parsing the model's own output. `location` is `None` when the source
+    type doesn't carry anything more precise than "the whole document" (no
+    page/chunk tracking exists for notebook/source chat today).
+    """
+
+    number: int = Field(..., description="The [n] bracket number cited in the answer")
+    ref_type: Literal["source", "source_insight", "note"] = Field(
+        ..., description="What kind of record this citation points to"
+    )
+    ref_id: str = Field(..., description="Full record id, e.g. 'source:abc123'")
+    title: str = Field(..., description="Display title of the cited item")
+    location: Optional[str] = Field(
+        None,
+        description="Human-readable location within the item (e.g. 'Insight: summary'), when known",
+    )
+    snippet: str = Field(..., description="Short excerpt of the cited text")
+
+
 class AskResponse(BaseModel):
     answer: str = Field(..., description="Final answer from the knowledge base")
     question: str = Field(..., description="Original question")
+    citations: List[Citation] = Field(
+        default_factory=list,
+        description=(
+            "Structured citations backing the [n] markers in `answer`. May be "
+            "empty if the graph building this response hasn't been wired to "
+            "populate it yet."
+        ),
+    )
 
 
 # Models API models
@@ -89,6 +129,30 @@ class ModelResponse(BaseModel):
     created: str
     updated: str
 
+    # Honest, best-effort metadata (P2 "Modelos, costo y confianza") - see
+    # open_notebook/ai/model_metadata.py. context_window/capabilities are
+    # None/[] when genuinely not known (most direct-provider models today),
+    # never a fabricated guess. There is deliberately no "speed" field: no
+    # provider or library in this codebase reports latency/throughput, so a
+    # fast/standard/slow label would be invented, not measured.
+    context_window: Optional[int] = Field(
+        None, description="Token context window, when known (e.g. OpenRouter catalog)"
+    )
+    capabilities: List[str] = Field(
+        default_factory=list,
+        description="Known capability flags, e.g. ['vision', 'tools']. Empty when unknown.",
+    )
+    capabilities_known: bool = Field(
+        False,
+        description=(
+            "Whether `capabilities` reflects real catalog data. False means "
+            "'not tracked for this provider', not 'confirmed no capabilities'."
+        ),
+    )
+    metadata_source: Optional[str] = Field(
+        None, description="Where context_window/capabilities came from, e.g. 'openrouter-catalog'"
+    )
+
 
 class DefaultModelsResponse(BaseModel):
     default_chat_model: Optional[str] = None
@@ -98,6 +162,18 @@ class DefaultModelsResponse(BaseModel):
     default_speech_to_text_model: Optional[str] = None
     default_embedding_model: Optional[str] = None
     default_tools_model: Optional[str] = None
+
+    # Ordered fallback chains (automatic failover) - the primary field above
+    # stays the first entry; these are additional models tried in order when
+    # the primary fails (e.g. free-tier rate limit). See
+    # open_notebook.ai.provision.provision_langchain_model().
+    chat_fallback_models: List[str] = []
+    transformation_fallback_models: List[str] = []
+    large_context_fallback_models: List[str] = []
+    tools_fallback_models: List[str] = []
+    embedding_fallback_models: List[str] = []
+    text_to_speech_fallback_models: List[str] = []
+    speech_to_text_fallback_models: List[str] = []
 
 
 class ProviderAvailabilityResponse(BaseModel):
@@ -171,6 +247,100 @@ class TransformationExecuteResponse(BaseModel):
     output: str = Field(..., description="Transformed text")
     transformation_id: str = Field(..., description="ID of the transformation used")
     model_id: Optional[str] = Field(None, description="Model ID used")
+    input_tokens: Optional[int] = Field(
+        None, description="Actual input tokens reported by the provider for this run"
+    )
+    output_tokens: Optional[int] = Field(
+        None, description="Actual output tokens reported by the provider for this run"
+    )
+    cost_status: Optional[Literal["known", "free", "unknown"]] = Field(
+        None,
+        description=(
+            "Whether the real post-execution cost below is known, free, or "
+            "unknown (no price available) - never a fake $0"
+        ),
+    )
+    actual_cost_usd: Optional[float] = Field(
+        None,
+        description=(
+            "Real cost recorded for this run from its usage_event, in USD. "
+            "None when cost_status is not 'known'."
+        ),
+    )
+
+
+class TransformationPreviewRequest(BaseModel):
+    """Preview the exact prompt a transformation will send, before saving it."""
+
+    prompt: str = Field(..., description="The transformation instructions to preview")
+    sample_text: Optional[str] = Field(
+        None,
+        description=(
+            "Optional sample source content to preview interpolation with. "
+            "A generic placeholder is used when omitted."
+        ),
+    )
+
+
+class TransformationPreviewResponse(BaseModel):
+    system_prompt: str = Field(
+        ..., description="The fully rendered system prompt that will be sent"
+    )
+    sample_input: str = Field(
+        ...,
+        description=(
+            "The sample/placeholder content, sent as a separate user message "
+            "(source content is never interpolated into the system prompt)"
+        ),
+    )
+
+
+class TransformationCostEstimateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    transformation_id: str = Field(..., description="ID of the transformation")
+    input_text: str = Field(
+        ..., description="The text that would be sent (used for the token estimate)"
+    )
+    model_id: Optional[str] = Field(
+        None, description="Model override; falls back to the transformation/system default"
+    )
+
+
+class TransformationCostEstimateResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_id: Optional[str] = Field(None, description="Effective model that would be used")
+    provider: Optional[str] = Field(None, description="Provider of the effective model")
+    model_name: Optional[str] = Field(None, description="Name of the effective model")
+    cost_status: Literal["known", "free", "unknown"] = Field(
+        ..., description="Whether the estimate below is known, free, or unknown"
+    )
+    estimated_cost_usd: Optional[float] = Field(
+        None, description="Best-effort estimated cost in USD; None when unknown"
+    )
+    estimated_input_tokens: int = Field(
+        ..., description="Token estimate for the instructions + input text"
+    )
+    estimated_output_tokens: int = Field(
+        ..., description="Rough output token estimate (actual usage is unknown ahead of time)"
+    )
+    is_estimate: bool = Field(
+        True, description="Always true - real cost is only known after execution"
+    )
+
+
+class TransformationResultVersionResponse(BaseModel):
+    version: int
+    content: str
+    created: Optional[str] = None
+    is_latest: bool = False
+
+
+class TransformationResultHistoryResponse(BaseModel):
+    transformation_id: str
+    source_id: str
+    versions: List[TransformationResultVersionResponse]
 
 
 # Default Prompt API models
@@ -330,6 +500,13 @@ class SourceCreate(BaseModel):
     async_processing: bool = Field(
         False, description="Whether to process source asynchronously"
     )
+    # Duplicate-detection override: the duplicate pre-check (text/upload
+    # sources only - see api/routers/sources.py) returns 409 on a
+    # content_hash match unless this is set, letting the client resubmit
+    # the exact same request after the user confirms "add anyway".
+    force_duplicate: bool = Field(
+        False, description="Create even if an identical source already exists"
+    )
 
     @model_validator(mode="after")
     def validate_notebook_fields(self):
@@ -373,6 +550,13 @@ class SourceResponse(BaseModel):
     processing_info: Optional[Dict] = None
     # Notebook associations
     notebooks: Optional[List[str]] = None
+    # Archive flag (mirrors Notebook.archived) - see migration 30
+    archived: bool = False
+    # Set when another source in one of this source's notebooks shares the
+    # same content_hash. A UX hint, not a hard block - see
+    # open_notebook/graphs/source.py save_source().
+    duplicate_of: Optional[str] = None
+    duplicate_of_title: Optional[str] = None
 
 
 class SourceListResponse(BaseModel):
@@ -390,6 +574,42 @@ class SourceListResponse(BaseModel):
     command_id: Optional[str] = None
     status: Optional[str] = None
     processing_info: Optional[Dict[str, Any]] = None
+    archived: bool = False
+    duplicate_of: Optional[str] = None
+
+
+class SourceDeletePreview(BaseModel):
+    """Explicit delete-impact summary - see Source.get_delete_preview()."""
+
+    source_id: str
+    chunk_count: int = Field(..., description="Embedded chunks that will be removed")
+    insight_count: int = Field(..., description="Insights that will be removed")
+    chat_session_count: int = Field(
+        ...,
+        description=(
+            "Source-scoped chat sessions that reference this source directly "
+            "and will be removed with it. Does not count inline citations "
+            "inside notebook-wide chat answers - those have no foreign key "
+            "anywhere in the schema."
+        ),
+    )
+    notebook_count: int = Field(
+        ..., description="Notebooks this source is linked to (unlinked, not deleted)"
+    )
+
+
+class SourceUploadLimits(BaseModel):
+    """Single source of truth for upload limits the UI should display.
+
+    Mirrors the real enforced limit (api/middleware.py MaxBodySizeMiddleware)
+    instead of a hardcoded guess that could drift from it. There is no fixed
+    file-type allowlist to report: content-core content-sniffs uploads
+    (50+ formats) rather than relying on a hand-maintained extension list -
+    see tests/test_upload_type_mitigations.py for why that's intentional.
+    """
+
+    max_upload_size_bytes: int
+    max_upload_size_mb: float
 
 
 # Insights API models
@@ -794,3 +1014,469 @@ class NotebookDeleteResponse(BaseModel):
     deleted_chat_sessions: int = Field(
         ..., description="Number of chat sessions deleted"
     )
+
+
+# Usage tracking API models
+class UsagePeriodInfo(BaseModel):
+    preset: str = Field(
+        ..., description="7d | 30d | 365d | all | custom (legacy month=30d, year=365d)"
+    )
+    from_: Optional[str] = Field(
+        None, alias="from", description="ISO start of the range (None = beginning)"
+    )
+    to: Optional[str] = Field(None, description="ISO end of the range (None = now)")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class UsageTokenTotals(BaseModel):
+    input: int = Field(..., description="Total input tokens (includes cache reads)")
+    output: int = Field(..., description="Total output tokens")
+    cached_input: int = Field(
+        ..., description="Cache-read input tokens (only from providers that report it)"
+    )
+    cached_input_reported_events: int = Field(
+        ..., description="Number of events whose provider reported cache reads"
+    )
+    embedding: Optional[int] = Field(
+        None, description="Embedding tokens; None when embeddings are not tracked"
+    )
+    embeddings_tracked: bool = Field(
+        ..., description="Whether embedding calls are recorded at all"
+    )
+
+
+class UsageCostTotals(BaseModel):
+    known_usd: float = Field(
+        ..., description="Sum of costs that are known (paid known prices + free=0)"
+    )
+    known_cost_events: int
+    free_events: int
+    unknown_cost_events: int = Field(
+        ..., description="Events whose price is unknown (excluded from known_usd)"
+    )
+    unknown_cost_input_tokens: int
+    unknown_cost_output_tokens: int
+    is_complete: bool = Field(
+        ..., description="True when no event in the selection has an unknown cost"
+    )
+
+
+class UsageBreakdownItem(BaseModel):
+    key: str
+    provider: Optional[str] = None
+    event_count: int
+    failed_count: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    cost_known_usd: float
+    known_cost_events: int
+    free_events: int
+    unknown_cost_events: int
+
+
+class UsageFilterOptions(BaseModel):
+    models: List[str] = Field(default_factory=list)
+    providers: List[str] = Field(default_factory=list)
+    task_types: List[str] = Field(default_factory=list)
+
+
+class UsageSummaryResponse(BaseModel):
+    """Aggregated LLM usage/cost (GET /api/usage/summary).
+
+    Single source of truth: usage_event rows. Unknown prices are never
+    counted as $0 - see `cost.unknown_cost_events`.
+    """
+
+    event_count: int = Field(..., description="Number of LLM calls in the selection")
+    failed_count: int = Field(..., description="Calls that ended in an error")
+    period: UsagePeriodInfo
+    generated_at: str = Field(..., description="ISO timestamp when computed")
+    tokens: UsageTokenTotals
+    cost: UsageCostTotals
+    budget_usd: float = Field(
+        ..., description="Configured budget in USD (STUDY_BUDGET_USD, default 10.0)"
+    )
+    by_provider: List[UsageBreakdownItem] = Field(default_factory=list)
+    by_model: List[UsageBreakdownItem] = Field(default_factory=list)
+    by_task_type: List[UsageBreakdownItem] = Field(default_factory=list)
+    filter_options: UsageFilterOptions
+    applied_filters: Dict[str, Optional[str]] = Field(default_factory=dict)
+    pricing_table_version: str = Field(
+        ..., description="Version of the static price table in effect"
+    )
+
+
+# Budget API models (P2 "Modelos, costo y confianza")
+class BudgetPeriodStatus(BaseModel):
+    limit_usd: Optional[float] = Field(
+        None, description="Configured limit for this period; None = no cap"
+    )
+    spent_usd: float = Field(..., description="Known-cost spend so far this period")
+    remaining_usd: Optional[float] = Field(
+        None, description="limit_usd - spent_usd; None when no limit is configured"
+    )
+    is_over: bool = Field(..., description="Whether spend already reached/passed the limit")
+
+
+class BudgetStatusResponse(BaseModel):
+    daily_budget_usd: Optional[float] = Field(
+        None, description="User-configured daily limit (None = not configured)"
+    )
+    monthly_budget_usd_configured: Optional[float] = Field(
+        None,
+        description=(
+            "User-configured monthly limit (None = falling back to the "
+            "STUDY_BUDGET_USD environment variable)"
+        ),
+    )
+    daily: BudgetPeriodStatus
+    monthly: BudgetPeriodStatus
+
+
+class BudgetSettingsUpdate(BaseModel):
+    daily_budget_usd: Optional[float] = Field(
+        None, description="New daily limit in USD; omit/null clears it (no daily cap)"
+    )
+    monthly_budget_usd: Optional[float] = Field(
+        None,
+        description=(
+            "New monthly limit in USD; omit/null falls back to STUDY_BUDGET_USD"
+        ),
+    )
+
+
+class BudgetCheckRequest(BaseModel):
+    estimated_cost_usd: float = Field(
+        ..., ge=0, description="Estimated cost of the operation about to run"
+    )
+
+
+class BudgetCheckResponse(BaseModel):
+    estimated_cost_usd: float
+    would_exceed_daily: bool = Field(
+        ..., description="Whether spent_usd + estimated_cost_usd would pass the daily limit"
+    )
+    would_exceed_monthly: bool = Field(
+        ..., description="Whether spent_usd + estimated_cost_usd would pass the monthly limit"
+    )
+    daily: BudgetPeriodStatus
+    monthly: BudgetPeriodStatus
+
+
+# Study Tools API models (flashcards + quiz generation)
+class GenerateFlashcardsRequest(BaseModel):
+    notebook_id: str = Field(..., description="Notebook to generate flashcards from")
+    name: str = Field(..., description="Display name for the study set")
+    item_count: int = Field(
+        10, description="Target number of flashcards to generate", ge=1, le=50
+    )
+    model_id: Optional[str] = Field(
+        None,
+        description="Model ID to use (uses the default transformation model if not provided)",
+    )
+
+
+class GenerateQuizRequest(BaseModel):
+    notebook_id: str = Field(..., description="Notebook to generate a quiz from")
+    name: str = Field(..., description="Display name for the study set")
+    item_count: int = Field(
+        10, description="Target number of quiz questions to generate", ge=1, le=50
+    )
+    model_id: Optional[str] = Field(
+        None,
+        description="Model ID to use (uses the default transformation model if not provided)",
+    )
+
+
+class StudySetGenerationResponse(BaseModel):
+    """Response for POST /study/flashcards and POST /study/quiz."""
+
+    job_id: str
+    status: str
+    message: str
+    notebook_id: str
+    name: str
+
+
+class StudySetResponse(BaseModel):
+    id: str
+    notebook: str
+    kind: Literal["flashcards", "quiz"]
+    name: str
+    items: List[Dict[str, Any]]
+    model_id: Optional[str] = None
+    created: Optional[str] = None
+    updated: Optional[str] = None
+    job_status: Optional[str] = None
+    error_message: Optional[str] = None
+    due_count: int = Field(
+        0, description="Flashcards due for spaced-repetition review right now (0 for quiz sets)"
+    )
+
+
+class StudySetListResponse(BaseModel):
+    id: str
+    notebook: str
+    kind: Literal["flashcards", "quiz"]
+    name: str
+    item_count: int
+    model_id: Optional[str] = None
+    created: Optional[str] = None
+    updated: Optional[str] = None
+    job_status: Optional[str] = None
+    error_message: Optional[str] = None
+    due_count: int = Field(
+        0, description="Flashcards due for spaced-repetition review right now (0 for quiz sets)"
+    )
+
+
+class ReviewFlashcardRequest(BaseModel):
+    """Body for POST /study/{study_set_id}/items/{item_index}/review.
+
+    Self-graded recall difficulty, same 4-way scale as well-known
+    spaced-repetition tools - drives the next due date (see
+    open_notebook/study/models.py::score_flashcard_review).
+    """
+
+    rating: Literal["again", "hard", "good", "easy"] = Field(
+        ..., description="How well the card was recalled just now"
+    )
+
+
+class ReviewFlashcardResponse(BaseModel):
+    study_set_id: str
+    item_index: int
+    item: Dict[str, Any] = Field(..., description="The flashcard item with updated SRS state")
+    due_count: int = Field(..., description="Remaining flashcards due in this set after this review")
+
+
+class GradeFlashcardRequest(BaseModel):
+    """Body for POST /study/{study_set_id}/items/{item_index}/grade.
+
+    Guided study mode ("Modo guiado con IA"): the student types a free-text
+    answer instead of self-grading a flipped card, and the AI checks it.
+    """
+
+    answer: str = Field(..., description="The student's free-text answer to the flashcard's front")
+    attempt: int = Field(
+        1, description="Attempt number for this card in this sitting (starts at 1)", ge=1
+    )
+
+
+class GradeFlashcardResponse(BaseModel):
+    correct: bool = Field(..., description="Whether the AI judged the answer as demonstrating understanding")
+    feedback: str = Field(..., description="AI feedback on the student's answer, in the student's own language")
+    rating: Literal["again", "hard", "good", "easy"] = Field(
+        ..., description="Spaced-repetition rating recorded for this attempt"
+    )
+    attempt: int = Field(..., description="Attempt number this response corresponds to")
+    revealed_answer: Optional[str] = Field(
+        None,
+        description="The reference answer, present only when force-revealed after the max attempts",
+    )
+    item: Dict[str, Any] = Field(..., description="The flashcard item with updated SRS state")
+    due_count: int = Field(..., description="Remaining flashcards due in this set after this review")
+
+
+class SuspendFlashcardRequest(BaseModel):
+    """Body for POST /study/{study_set_id}/items/{item_index}/suspend.
+
+    Pauses (or resumes) spaced-repetition scheduling for one card without
+    deleting it - see open_notebook/study/models.py::StudySet.set_item_suspended.
+    """
+
+    suspended: bool = Field(
+        ..., description="True to suspend (exclude from due/review), False to resume"
+    )
+
+
+class SuspendFlashcardResponse(BaseModel):
+    study_set_id: str
+    item_index: int
+    item: Dict[str, Any] = Field(..., description="The flashcard item with updated suspended flag")
+    due_count: int = Field(..., description="Remaining flashcards due in this set after this change")
+
+
+class WeakSourceStat(BaseModel):
+    """One entry in StudyMetricsResponse.weak_sources.
+
+    "Topic" here means the source (by its generation-time `source_title`
+    citation, see Flashcard.source_title) a card came from - there is no
+    separate topic/tag taxonomy on study content to hang a richer concept
+    on, so this is the honest, smallest version: which source's cards you
+    are recalling the least.
+    """
+
+    source_title: str
+    accuracy_pct: int = Field(..., description="Share of reviewed cards from this source rated good/easy")
+    reviewed_count: int = Field(..., description="Number of reviewed cards from this source")
+
+
+class StudyMetricsResponse(BaseModel):
+    """Response for GET /study/metrics.
+
+    Deliberately simple and honest: no invented score, streak, or XP -
+    every field here is either a direct count or a plain percentage
+    computed from recorded review outcomes.
+    """
+
+    due_today: int = Field(..., description="Flashcards due for review right now (excludes suspended cards)")
+    accuracy_pct: Optional[int] = Field(
+        None,
+        description=(
+            "Share of reviewed flashcards whose most recent rating was "
+            "good/easy. Null if nothing has been reviewed yet - never shown "
+            "as a fabricated 0%."
+        ),
+    )
+    reviewed_cards: int = Field(..., description="Flashcards with at least one recorded review")
+    total_cards: int = Field(..., description="Total flashcards across the scoped study sets")
+    weak_sources: List[WeakSourceStat] = Field(
+        default_factory=list,
+        description="Up to 5 sources with the lowest recall accuracy (min 2 reviewed cards each)",
+    )
+
+
+# Google Drive integration API models
+class DriveAuthUrlResponse(BaseModel):
+    """Response for GET /drive/auth-url."""
+
+    auth_url: str = Field(
+        ..., description="Google OAuth consent URL to redirect the browser to"
+    )
+
+
+class DriveStatusResponse(BaseModel):
+    """Response for GET /drive/status."""
+
+    connected: bool = Field(
+        ..., description="Whether a usable Drive connection exists (read from the DB)"
+    )
+    configured: bool = Field(
+        True, description="Whether the GOOGLE_DRIVE_* OAuth env vars are set"
+    )
+    account_email: Optional[str] = Field(
+        None, description="Connected Google account email, for display"
+    )
+    granted_scopes: List[str] = Field(
+        default_factory=list, description="OAuth scopes Google granted"
+    )
+    connected_at: Optional[str] = Field(None, description="ISO datetime of connection")
+    last_sync_at: Optional[str] = Field(
+        None, description="ISO datetime of the last successful list/import"
+    )
+    needs_reconnect: bool = Field(
+        False, description="Grant revoked/expired or Drive scope missing"
+    )
+    reconnect_reason: Optional[str] = Field(
+        None, description="'revoked' | 'missing_scope' when needs_reconnect"
+    )
+
+
+class DriveDisconnectResponse(BaseModel):
+    """Response for DELETE /drive/disconnect."""
+
+    message: str
+
+
+class DriveFileResponse(BaseModel):
+    """A single Drive file entry (metadata only)."""
+
+    id: str
+    name: str
+    mime_type: str
+    modified_time: Optional[str] = None
+    icon_link: Optional[str] = None
+
+
+class DriveFileListResponse(BaseModel):
+    """Response for GET /drive/files."""
+
+    files: List[DriveFileResponse]
+    next_page_token: Optional[str] = None
+
+
+class DriveImportRequest(BaseModel):
+    """Request body for POST /drive/import."""
+
+    file_id: str = Field(..., description="Google Drive file ID to import")
+    notebook_id: str = Field(
+        ..., description="Notebook ID to add the imported source to"
+    )
+
+
+# =============================================================================
+# Audit log / activity history (P2 "Seguridad")
+# =============================================================================
+
+
+class ActivityItemResponse(BaseModel):
+    """A single audit log entry. `action` is a canonical code (e.g.
+    "notebook_deleted") the frontend translates to a sentence - never shown
+    raw. `detail` is short, non-sensitive context; never secret values or
+    full content of what was acted on."""
+
+    id: str
+    action: str
+    detail: Optional[str] = None
+    created: str
+
+
+class ActivityListResponse(BaseModel):
+    """Response for GET /api/activity."""
+
+    items: List[ActivityItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+# =============================================================================
+# Privacy center (P2 "Seguridad") - export / delete all data
+# =============================================================================
+
+
+class PrivacyExportResponse(BaseModel):
+    """Response for GET /api/privacy/export.
+
+    A JSON snapshot of this instance's content metadata - notebooks,
+    sources, notes, chat sessions, study sets, podcast episodes, and
+    credential/Drive-connection *metadata only* (never secret values).
+    Large binary blobs (uploaded files, podcast audio) are NOT inlined -
+    each source/episode entry carries its on-disk file_path/audio_file
+    reference instead, documented in `note`.
+    """
+
+    generated_at: str
+    note: str
+    notebooks: List[Dict[str, Any]]
+    sources: List[Dict[str, Any]]
+    notes: List[Dict[str, Any]]
+    chat_sessions: List[Dict[str, Any]]
+    study_sets: List[Dict[str, Any]]
+    episodes: List[Dict[str, Any]]
+    credentials: List[Dict[str, Any]]
+    drive_connection: Optional[Dict[str, Any]] = None
+
+
+class PrivacyDeleteRequest(BaseModel):
+    """Request body for DELETE /api/privacy/data.
+
+    `confirm` must exactly equal the literal phrase the frontend shows the
+    user in the destructive-confirmation dialog - a lightweight
+    double-confirmation that this isn't a misclick, on top of the UI's own
+    confirm dialog.
+    """
+
+    confirm: str = Field(
+        ..., description='Must be exactly "DELETE ALL MY DATA"'
+    )
+
+
+class PrivacyDeleteResponse(BaseModel):
+    """Response for DELETE /api/privacy/data: counts of what was removed."""
+
+    message: str
+    deleted: Dict[str, int]

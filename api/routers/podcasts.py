@@ -1,3 +1,4 @@
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -6,6 +7,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from api.podcast_service import (
+    PodcastGenerationEstimateResponse,
     PodcastGenerationRequest,
     PodcastGenerationResponse,
     PodcastService,
@@ -14,6 +16,7 @@ from open_notebook.ai.models import Model
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.podcasts.audio_paths import resolve_contained_audio_path
 from open_notebook.podcasts.models import PodcastEpisode
+from open_notebook.utils.job_status import normalize_job_status, sanitize_job_error
 
 router = APIRouter()
 
@@ -114,11 +117,108 @@ class PodcastEpisodeResponse(BaseModel):
     briefing: str
     audio_file: Optional[str] = None
     audio_url: Optional[str] = None
+    audio_size_bytes: Optional[int] = None
     transcript: Optional[dict] = None
     outline: Optional[dict] = None
     created: Optional[str] = None
     job_status: Optional[str] = None
     error_message: Optional[str] = None
+    command_id: Optional[str] = None
+    favorited: bool = False
+    tags: List[str] = []
+    content_notebooks: List[str] = []
+
+
+class PodcastEpisodeOrganizationUpdate(BaseModel):
+    """Body for PATCH /podcasts/episodes/{episode_id} (favorite/tag only -
+    episode content/profile snapshots are immutable after generation)."""
+
+    favorited: Optional[bool] = None
+    tags: Optional[List[str]] = None
+
+
+_NOTEBOOK_LABEL_PATTERN = re.compile(r"^(?:Notebook|Cuaderno): (.+)$", re.MULTILINE)
+
+
+def _resolve_audio_url_and_size(episode: PodcastEpisode) -> tuple:
+    """Resolve the protected audio URL and the file's size on disk.
+
+    Shared by list/get so both expose audio_size_bytes - a cheap stat() call
+    (not a read) that lets the frontend show file size BEFORE fetching the
+    audio (see EpisodeCard's lazy load-to-play button, P1 "no silent large
+    downloads").
+    """
+    audio_url = None
+    audio_size_bytes = None
+    audio_path = resolve_contained_audio_path(episode.audio_file)
+    if audio_path is not None and audio_path.exists():
+        audio_url = f"/api/podcasts/episodes/{episode.id}/audio"
+        try:
+            audio_size_bytes = audio_path.stat().st_size
+        except OSError as e:
+            logger.warning(f"Could not stat audio file for episode {episode.id}: {e}")
+    return audio_url, audio_size_bytes
+
+
+def _extract_content_notebooks(content: Optional[str]) -> List[str]:
+    """Best-effort extraction of which notebooks fed an episode's content.
+
+    PodcastEpisode has no structured "sources used" field - the generation
+    dialog (GeneratePodcastDialog.buildContentFromSelections) flattens the
+    user's source/note selection into one big text blob per notebook, each
+    headed by a line from common.notebookLabel ("Notebook: {{name}}" /
+    "Cuaderno: {{name}}" - the only two locales that render this label with
+    real, non-English-fallback text, see frontend/src/lib/locales). This
+    recovers just the notebook names from that header line without changing
+    the storage format or the generation pipeline (commands/podcast_commands.py)
+    - intentionally scoped down from a structured source-id list, which would
+    need a schema/pipeline change in code outside this agent's scope. Legacy
+    episodes generated before this existed, or ones whose content didn't use
+    that header, simply report no content_notebooks (never an error).
+    """
+    if not content:
+        return []
+    seen: List[str] = []
+    for match in _NOTEBOOK_LABEL_PATTERN.finditer(content):
+        name = match.group(1).strip()
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
+@router.get("/podcasts/estimate", response_model=PodcastGenerationEstimateResponse)
+async def estimate_podcast_generation(
+    episode_profile: str,
+    speaker_profile: str,
+    estimated_input_tokens: Optional[int] = None,
+):
+    """
+    Best-effort cost/usage estimate for a podcast generation, intended to be
+    shown to the user BEFORE they confirm the actual `/podcasts/generate`
+    call (P1 "Podcasts y audio" - explicit cost estimate before generation).
+
+    Returns the provider/model that will be used for each generation stage
+    (outline, transcript, TTS) and a price where one is known - reusing the
+    same versioned price table / free-rule / OpenRouter-catalog lookup the
+    Cost Meter (usage_event) uses, so the number is consistent with what
+    actually gets billed afterwards. An unpriced model is reported as
+    cost_status="unknown" with estimated_cost_usd=None, never a fake $0.
+    """
+    try:
+        return await PodcastService.estimate_generation(
+            episode_profile_name=episode_profile,
+            speaker_profile_name=speaker_profile,
+            estimated_input_tokens=estimated_input_tokens,
+        )
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error estimating podcast generation cost: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail="Failed to estimate podcast generation cost"
+        )
 
 
 @router.post("/podcasts/generate", response_model=PodcastGenerationResponse)
@@ -208,18 +308,15 @@ async def list_podcast_episodes():
             if episode.command:
                 detail = details_by_command.get(str(episode.command))
                 if detail is not None:
-                    job_status = detail["status"]
-                    error_message = detail["error_message"]
+                    job_status = normalize_job_status(detail["status"])
+                    error_message = sanitize_job_error(detail["error_message"])
                 else:
                     job_status = "unknown"
             else:
                 # No command but has audio file = completed import
                 job_status = "completed"
 
-            audio_url = None
-            audio_path = resolve_contained_audio_path(episode.audio_file)
-            if audio_path is not None and audio_path.exists():
-                audio_url = f"/api/podcasts/episodes/{episode.id}/audio"
+            audio_url, audio_size_bytes = _resolve_audio_url_and_size(episode)
 
             response_episodes.append(
                 PodcastEpisodeResponse(
@@ -238,11 +335,16 @@ async def list_podcast_episodes():
                     briefing=episode.briefing,
                     audio_file=episode.audio_file,
                     audio_url=audio_url,
+                    audio_size_bytes=audio_size_bytes,
                     transcript=episode.transcript,
                     outline=episode.outline,
                     created=str(episode.created) if episode.created else None,
                     job_status=job_status,
                     error_message=error_message,
+                    command_id=str(episode.command) if episode.command else None,
+                    favorited=bool(episode.favorited),
+                    tags=list(episode.tags or []),
+                    content_notebooks=_extract_content_notebooks(episode.content),
                 )
             )
 
@@ -271,18 +373,15 @@ async def get_podcast_episode(episode_id: str):
         if episode.command:
             try:
                 detail = await episode.get_job_detail()
-                job_status = detail["status"]
-                error_message = detail["error_message"]
+                job_status = normalize_job_status(detail["status"])
+                error_message = sanitize_job_error(detail["error_message"])
             except Exception:
                 job_status = "unknown"
         else:
             # No command but has audio file = completed import
             job_status = "completed" if episode.audio_file else "unknown"
 
-        audio_url = None
-        audio_path = resolve_contained_audio_path(episode.audio_file)
-        if audio_path is not None and audio_path.exists():
-            audio_url = f"/api/podcasts/episodes/{episode.id}/audio"
+        audio_url, audio_size_bytes = _resolve_audio_url_and_size(episode)
 
         models_by_id = await _resolve_snapshot_models([episode])
 
@@ -302,11 +401,16 @@ async def get_podcast_episode(episode_id: str):
             briefing=episode.briefing,
             audio_file=episode.audio_file,
             audio_url=audio_url,
+            audio_size_bytes=audio_size_bytes,
             transcript=episode.transcript,
             outline=episode.outline,
             created=str(episode.created) if episode.created else None,
             job_status=job_status,
             error_message=error_message,
+            command_id=str(episode.command) if episode.command else None,
+            favorited=bool(episode.favorited),
+            tags=list(episode.tags or []),
+            content_notebooks=_extract_content_notebooks(episode.content),
         )
 
     except HTTPException:
@@ -316,6 +420,43 @@ async def get_podcast_episode(episode_id: str):
     except Exception as e:
         logger.error(f"Error fetching podcast episode: {str(e)}")
         raise HTTPException(status_code=404, detail="Episode not found")
+
+
+@router.patch("/podcasts/episodes/{episode_id}", response_model=PodcastEpisodeResponse)
+async def update_podcast_episode_organization(
+    episode_id: str, update: PodcastEpisodeOrganizationUpdate
+):
+    """Update an episode's favorite flag and/or tags (P1 "Organizacion y
+    busqueda" - minimal organization metadata). Only favorited/tags are
+    mutable; the generated content/profile snapshots are immutable."""
+    try:
+        episode = await PodcastService.get_episode(episode_id)
+
+        if update.favorited is not None:
+            episode.favorited = update.favorited
+        if update.tags is not None:
+            # Dedupe + drop blanks, same light normalization as the frontend
+            # tag input - keeps the stored list honest without a taxonomy.
+            seen: List[str] = []
+            for tag in update.tags:
+                cleaned = tag.strip()
+                if cleaned and cleaned not in seen:
+                    seen.append(cleaned)
+            episode.tags = seen
+
+        await episode.save()
+
+        return await get_podcast_episode(str(episode.id))
+
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating podcast episode organization: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail="Failed to update episode"
+        )
 
 
 @router.get("/podcasts/episodes/{episode_id}/audio")
@@ -360,10 +501,11 @@ async def retry_podcast_episode(episode_id: str):
 
         # Validate episode is in a failed state
         detail = await episode.get_job_detail()
-        if detail["status"] not in ("failed", "error"):
+        current_status = normalize_job_status(detail["status"])
+        if current_status not in ("failed", "canceled"):
             raise HTTPException(
                 status_code=400,
-                detail=f"Episode is not in a failed state (current: {detail['status']})",
+                detail=f"Episode is not in a failed state (current: {current_status})",
             )
 
         # Extract params for re-submission

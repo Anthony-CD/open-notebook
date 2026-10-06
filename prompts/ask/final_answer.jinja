@@ -22,9 +22,17 @@ Here are the answers you received for each of your queries.
 
 {{answers}}
 
+{% if references %}
+# REFERENCE LIST
+
+This is the numbered, deduplicated list of everything actually retrieved across all of your queries. Each entry is `[n] <title>: <snippet>`:
+
+{{references}}
+{% endif %}
+
 # YOUR JOB
 
-Based on the user question, the context and the retrieved answers, please formulate a final response to the user. 
+Based on the user question, the context and the retrieved answers, please formulate a final response to the user.
 
 # MATH FORMATTING
 
@@ -32,13 +40,12 @@ When showing math, write display math as $$...$$ and inline math as $...$ so for
 
 # CITING SOURCES
 
-It's very important that your response contains references to the searched documents so the user can follow-up and read more about the topic. The way you do that is by adding the id of the specific document in between brackets like this: [document_id]. The references will be present on all the answers you have been provided.
+Whenever a sentence in your answer is based on one of the REFERENCE LIST entries above, cite it inline with its bracket number, like this: [1]. Use the exact number from the reference list - never a document ID, and never a number that isn't in the list.
 
 ## IMPORTANT
 
-- Do not make up documents or document ids. Only use the ids of the documents that you can see on the answers you received.
-- The ID is composed of the type of document and a random string, such as "source:randomstring", "note:randomstring", or "insight:randomstring". There are various types of documents, including notes, insights, and sources. **Always use the complete ID exactly as it is provided, including its type prefix. Do not add, remove, or modify any part of the ID.**
-- **Use document IDs exactly as they are returned in the answers. Do not add any prefixes or modify them in any way.**
+- Only cite numbers that appear in the reference list above. Do not invent a number, and do not cite a document ID directly.
+- **If the reference list and retrieved answers don't contain enough information to answer the question, say so plainly** instead of guessing - it's always better to admit insufficient evidence than to state something unsupported as fact.
 
 # YOUR ANSWER
 
